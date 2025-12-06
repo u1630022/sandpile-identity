@@ -14,13 +14,22 @@
  * Ref: https://www.youtube.com/watch?v=hBdJB-BzudU
  */
 #include <stdio.h>
+#include <assert.h>
+#include <immintrin.h>
 
 #ifndef N
-#  define N 500
+#  define N 512
 #endif
-#ifndef SCALE
-#  define SCALE 1
-#endif
+
+#define TILE_WIDTH 128
+#define TILE_HEIGHT 32
+#define xTILES N/TILE_WIDTH
+#define yTILES N/TILE_HEIGHT
+
+#define TOP 0
+#define LEFT 1
+#define BOTTOM 2
+#define RIGHT 3
 
 /* Color palette */
 #define C0 0xff9200
@@ -29,113 +38,212 @@
 #define C3 0x44c5cb
 #define CX 0x000000
 
-#include <immintrin.h>
-#define TAILSTART N/32*32
+static char** tiles;
+static char** messages;
 
-__attribute__((aligned(32))) static char state[2][2+N+31][2+N+31];
+static void
+make_tiles(void)
+{
+    tiles = calloc(yTILES * xTILES, sizeof(char*));
+    for (int yy = 0; yy < yTILES; yy++) {
+        for (int xx = 0; xx < xTILES; xx++) {
+            tiles[yy * xTILES + xx] = calloc(TILE_WIDTH * TILE_HEIGHT, sizeof(char));
+        }
+    }
+}
+
+static void
+make_messages(void)
+{
+    messages = calloc(yTILES * xTILES * 4, sizeof(char*));
+    for (int yy = 0; yy < yTILES; yy++) {
+        for (int xx = 0; xx < xTILES; xx++) {
+            for (int direction = 0; direction < 4; direction++) {
+                int tileIdx = yy * xTILES + xx;
+                size_t count;
+                if (direction % 2 == 0) {
+                    count = TILE_WIDTH;
+                } else {
+                    count = TILE_HEIGHT;
+                }
+                messages[tileIdx + direction] = calloc(count, sizeof(char));
+            }
+        }
+    }
+}
+
+static inline int
+message_idx(int tileIdx, int direction)
+{
+    return tileIdx + direction;
+}
+
+static inline int
+tile_idx(int y, int x)
+{
+    return (y / TILE_HEIGHT) * xTILES + (x / TILE_WIDTH);
+}
+
+static inline int
+local_idx(int y, int x)
+{
+    return (y % TILE_HEIGHT) * TILE_WIDTH + (x % TILE_WIDTH);
+}
 
 static void
 render(void)
 {
-    static unsigned char buf[3L*N*SCALE*N*SCALE];
+    static unsigned char buf[3L*N*N];
     static const long colors[] = {C0, C1, C2, C3};
-    for (int y = 0; y < N*SCALE; y++) {
-        for (int x = 0; x < N*SCALE; x++) {
-            int v = state[0][1+y/SCALE][1+x/SCALE];
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            int tileIdx = tile_idx(y, x);
+            int localIdx = local_idx(y, x);
+            int v = tiles[tileIdx][localIdx];
             long c = v < 4 ? colors[v] : CX;
-            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
-            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
-            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
+            buf[y*3L*N + x*3L + 0] = c >> 16;
+            buf[y*3L*N + x*3L + 1] = c >>  8;
+            buf[y*3L*N + x*3L + 2] = c >>  0;
         }
     }
-    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
+    printf("P6\n%d %d\n255\n", N, N);
     fwrite(buf, sizeof(buf), 1, stdout);
 }
 
 static void
 stabilize(void)
 {
-    for (int n = 0; ; n = !n) {
-        long spills = 0;
+    int globalSpills;
+    int localSpills;
+    do {
+        globalSpills = 0;
+        for (int tileIdx = 0; tileIdx < xTILES * yTILES; tileIdx++) {
+            // import sand from messages
+            for (int direction = 0; direction < 4; direction++) {
+                int importTileIdx = -1;
+                switch (direction) {
+                    case BOTTOM:
+                        if (tileIdx < xTILES) {
+                            break;
+                        }
+                        importTileIdx = tileIdx - xTILES;
+                        break;
+                    case TOP:
+                        if (tileIdx > yTILES * (xTILES - 1)) {
+                            break;
+                        }
+                        importTileIdx = tileIdx + xTILES;
+                        break;
+                    case RIGHT:
+                        if (tileIdx % xTILES == 0) {
+                            break;
+                        }
+                        importTileIdx = tileIdx - 1;
+                        break;
+                    case LEFT:
+                        if (tileIdx % xTILES == xTILES - 1) {
+                            break;
+                        }
+                        importTileIdx = tileIdx + 1;
+                        break;
+                }
 
-        int y; // To satisfy Visual Studio's OpenMP limitations :-(
-        #pragma omp parallel for
-        for (y = 0; y < N; y++) {
-            int xspills = 0;
+                if (importTileIdx == -1) {
+                    continue;
+                }
 
-            for (int x = 0; x < N/32*32; x += 32) {
-                __m256i v = _mm256_loadu_si256((void *)&state[n][1+y][1+x]);
-                __m256i m = _mm256_cmpgt_epi8(v, _mm256_set1_epi8(3));
-                __m256i s = _mm256_sub_epi8(v, _mm256_set1_epi8(4));
-                __m256i r = _mm256_blendv_epi8(v, s, m);
-                xspills += !_mm256_testz_si256(m, m);
-
-                v = _mm256_loadu_si256((void *)&state[n][1+y-1][1+x]);
-                m = _mm256_cmpgt_epi8(v, _mm256_set1_epi8(3));
-                s = _mm256_add_epi8(r, _mm256_set1_epi8(1));
-                r = _mm256_blendv_epi8(r, s, m);
-
-                v = _mm256_loadu_si256((void *)&state[n][1+y+1][1+x]);
-                m = _mm256_cmpgt_epi8(v, _mm256_set1_epi8(3));
-                s = _mm256_add_epi8(r, _mm256_set1_epi8(1));
-                r = _mm256_blendv_epi8(r, s, m);
-
-                v = _mm256_loadu_si256((void *)&state[n][1+y][1+x-1]);
-                m = _mm256_cmpgt_epi8(v, _mm256_set1_epi8(3));
-                s = _mm256_add_epi8(r, _mm256_set1_epi8(1));
-                r = _mm256_blendv_epi8(r, s, m);
-
-                v = _mm256_loadu_si256((void *)&state[n][1+y][1+x+1]);
-                m = _mm256_cmpgt_epi8(v, _mm256_set1_epi8(3));
-                s = _mm256_add_epi8(r, _mm256_set1_epi8(1));
-                r = _mm256_blendv_epi8(r, s, m);
-
-                _mm256_storeu_si256((void *)&state[!n][1+y][1+x], r);
+                char* msg = messages[message_idx(importTileIdx, direction)];
+                switch (direction) {
+                    case BOTTOM:
+                        for (int i = 0; i < TILE_WIDTH; i++) {
+                            int localIdx = i;
+                            tiles[tileIdx][localIdx] += msg[i];
+                            msg[i] = 0;
+                        }
+                        break;
+                    case TOP:
+                        for (int i = 0; i < TILE_WIDTH; i++) {
+                            int localIdx = TILE_WIDTH * (TILE_HEIGHT - 1) + i;
+                            tiles[tileIdx][localIdx] += msg[i];
+                            msg[i] = 0;
+                        }
+                        break;
+                    case LEFT:
+                        for (int i = 0; i < TILE_HEIGHT; i++) {
+                            int localIdx = TILE_WIDTH * (i + 1) - 1;
+                            tiles[tileIdx][localIdx] += msg[i];
+                            msg[i] = 0;
+                        }
+                        break;
+                    case RIGHT:
+                        for (int i = 0; i < TILE_HEIGHT; i++) {
+                            int localIdx = TILE_WIDTH * i;
+                            tiles[tileIdx][localIdx] += msg[i];
+                            msg[i] = 0;
+                        }
+                        break;
+                }
             }
 
-            for (int x = TAILSTART; x < N; x++) {
-                int v = state[n][1+y][1+x];
-                int r = v < 4 ? v : v - 4;
-                xspills += v >= 4;
-                r += state[n][1+y-1][1+x] >= 4;
-                r += state[n][1+y+1][1+x] >= 4;
-                r += state[n][1+y][1+x-1] >= 4;
-                r += state[n][1+y][1+x+1] >= 4;
-                state[!n][1+y][1+x] = r;
-            }
+            // Topple tile
+            do {
+                localSpills = 0;
+                for (int localIdx = 0; localIdx < TILE_HEIGHT * TILE_WIDTH; localIdx++) {
+                    char* v = &tiles[tileIdx][localIdx];
+                    if (*v < 4) {
+                        continue;
+                    }
 
-            #pragma omp atomic
-            spills += xspills;
+                    localSpills++;
+                    globalSpills++;
+                    *v -= 4;
+                    if (localIdx % TILE_WIDTH != TILE_WIDTH - 1) {
+                        *(v + 1) += 1;
+                    } else {
+                        messages[message_idx(tileIdx, RIGHT)][localIdx / TILE_WIDTH] += 1;
+                    }
+                    if (localIdx % TILE_WIDTH != 0) {
+                        *(v - 1) += 1;
+                    } else {
+                        messages[message_idx(tileIdx, LEFT)][localIdx / TILE_WIDTH] += 1;
+                    }
+                    if (localIdx < TILE_WIDTH * (TILE_HEIGHT - 1)) {
+                        *(v + TILE_WIDTH) += 1;
+                    } else {
+                        messages[message_idx(tileIdx, BOTTOM)][localIdx % TILE_WIDTH] += 1;
+                    }
+                    if (localIdx >= TILE_WIDTH) {
+                        *(v - TILE_WIDTH) += 1;
+                    } else {
+                        messages[message_idx(tileIdx, TOP)][localIdx % TILE_WIDTH] += 1;
+                    }
+                }
+            } while (localSpills > 0);
         }
-
-        #ifdef ANIMATE
-        render();
-        #endif
-
-        if (!spills) {
-            return;
-        }
-    }
+    } while (globalSpills > 0);
 }
 
 int
 main(void)
 {
+    assert(N % TILE_HEIGHT == 0);
+    assert(N % TILE_WIDTH == 0);
+
+    make_tiles();
+    make_messages();
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
-            state[0][1+y][1+x] = 6;
+            tiles[tile_idx(y, x)][local_idx(y, x)] = 6;
         }
     }
     stabilize();
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
-            state[0][1+y][1+x] = 6 - state[0][1+y][1+x];
+            int tileIdx = tile_idx(y, x);
+            int localIdx = local_idx(y, x);
+            tiles[tileIdx][localIdx] = 6 - tiles[tileIdx][localIdx];
         }
     }
     stabilize();
     render();
-
-    #ifdef ANIMATE
-    for (int i = 0; i < 180; i++) render();
-    #endif
 }
