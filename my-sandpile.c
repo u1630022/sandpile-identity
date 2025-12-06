@@ -18,13 +18,13 @@
 #include <immintrin.h>
 
 #ifndef N
-#  define N 512
+#  define N 506
 #endif
 
-#define TILE_WIDTH 128
-#define TILE_HEIGHT 32
-#define xTILES N/TILE_WIDTH
-#define yTILES N/TILE_HEIGHT
+#define TILE_WIDTH 253
+#define TILE_HEIGHT 253
+#define xTILES (N/TILE_WIDTH)
+#define yTILES (N/TILE_HEIGHT)
 
 #define TOP 0
 #define LEFT 1
@@ -38,16 +38,16 @@
 #define C3 0x44c5cb
 #define CX 0x000000
 
-static char** tiles;
-static char** messages;
+static unsigned short** tiles;
+static int** messages;
 
 static void
 make_tiles(void)
 {
-    tiles = calloc(yTILES * xTILES, sizeof(char*));
+    tiles = calloc(yTILES * xTILES, sizeof(unsigned short*));
     for (int yy = 0; yy < yTILES; yy++) {
         for (int xx = 0; xx < xTILES; xx++) {
-            tiles[yy * xTILES + xx] = calloc(TILE_WIDTH * TILE_HEIGHT, sizeof(char));
+            tiles[yy * xTILES + xx] = calloc(TILE_WIDTH * TILE_HEIGHT, sizeof(unsigned short));
         }
     }
 }
@@ -55,7 +55,7 @@ make_tiles(void)
 static void
 make_messages(void)
 {
-    messages = calloc(yTILES * xTILES * 4, sizeof(char*));
+    messages = calloc(yTILES * xTILES * 4, sizeof(int*));
     for (int yy = 0; yy < yTILES; yy++) {
         for (int xx = 0; xx < xTILES; xx++) {
             for (int direction = 0; direction < 4; direction++) {
@@ -66,7 +66,7 @@ make_messages(void)
                 } else {
                     count = TILE_HEIGHT;
                 }
-                messages[tileIdx + direction] = calloc(count, sizeof(char));
+                messages[tileIdx * 4 + direction] = calloc(count, sizeof(int));
             }
         }
     }
@@ -75,7 +75,7 @@ make_messages(void)
 static inline int
 message_idx(int tileIdx, int direction)
 {
-    return tileIdx + direction;
+    return tileIdx * 4 + direction;
 }
 
 static inline int
@@ -99,8 +99,8 @@ render(void)
         for (int x = 0; x < N; x++) {
             int tileIdx = tile_idx(y, x);
             int localIdx = local_idx(y, x);
-            int v = tiles[tileIdx][localIdx];
-            long c = v < 4 ? colors[v] : CX;
+            unsigned short v = tiles[tileIdx][localIdx];
+            long c = v < 4 && v >= 0 ? colors[v] : CX;
             buf[y*3L*N + x*3L + 0] = c >> 16;
             buf[y*3L*N + x*3L + 1] = c >>  8;
             buf[y*3L*N + x*3L + 2] = c >>  0;
@@ -119,6 +119,7 @@ stabilize(void)
         globalSpills = 0;
         for (int tileIdx = 0; tileIdx < xTILES * yTILES; tileIdx++) {
             // import sand from messages
+            int imports = 0;
             for (int direction = 0; direction < 4; direction++) {
                 int importTileIdx = -1;
                 switch (direction) {
@@ -129,7 +130,7 @@ stabilize(void)
                         importTileIdx = tileIdx - xTILES;
                         break;
                     case TOP:
-                        if (tileIdx > yTILES * (xTILES - 1)) {
+                        if (tileIdx >= yTILES * (xTILES - 1)) {
                             break;
                         }
                         importTileIdx = tileIdx + xTILES;
@@ -141,7 +142,7 @@ stabilize(void)
                         importTileIdx = tileIdx - 1;
                         break;
                     case LEFT:
-                        if (tileIdx % xTILES == xTILES - 1) {
+                        if ((1 + tileIdx) % xTILES == 0) {
                             break;
                         }
                         importTileIdx = tileIdx + 1;
@@ -152,11 +153,14 @@ stabilize(void)
                     continue;
                 }
 
-                char* msg = messages[message_idx(importTileIdx, direction)];
+                assert(importTileIdx < xTILES * yTILES);
+                int* msg = messages[message_idx(importTileIdx, direction)];
                 switch (direction) {
                     case BOTTOM:
                         for (int i = 0; i < TILE_WIDTH; i++) {
                             int localIdx = i;
+                            assert(msg[i] >= 0);
+                            assert(msg[i] < 256 * 256);
                             tiles[tileIdx][localIdx] += msg[i];
                             msg[i] = 0;
                         }
@@ -164,6 +168,8 @@ stabilize(void)
                     case TOP:
                         for (int i = 0; i < TILE_WIDTH; i++) {
                             int localIdx = TILE_WIDTH * (TILE_HEIGHT - 1) + i;
+                            assert(msg[i] < 256 * 256);
+                            assert(msg[i] >= 0);
                             tiles[tileIdx][localIdx] += msg[i];
                             msg[i] = 0;
                         }
@@ -171,6 +177,8 @@ stabilize(void)
                     case LEFT:
                         for (int i = 0; i < TILE_HEIGHT; i++) {
                             int localIdx = TILE_WIDTH * (i + 1) - 1;
+                            assert(msg[i] < 256 * 256);
+                            assert(msg[i] >= 0);
                             tiles[tileIdx][localIdx] += msg[i];
                             msg[i] = 0;
                         }
@@ -178,6 +186,8 @@ stabilize(void)
                     case RIGHT:
                         for (int i = 0; i < TILE_HEIGHT; i++) {
                             int localIdx = TILE_WIDTH * i;
+                            assert(msg[i] < 256 * 256);
+                            assert(msg[i] >= 0);
                             tiles[tileIdx][localIdx] += msg[i];
                             msg[i] = 0;
                         }
@@ -189,7 +199,8 @@ stabilize(void)
             do {
                 localSpills = 0;
                 for (int localIdx = 0; localIdx < TILE_HEIGHT * TILE_WIDTH; localIdx++) {
-                    char* v = &tiles[tileIdx][localIdx];
+                    unsigned short* v = &tiles[tileIdx][localIdx];
+                    assert(*v >= 0);
                     if (*v < 4) {
                         continue;
                     }
