@@ -115,6 +115,7 @@ stabilize(void)
 {
     long globalSpills;
     long localSpills;
+    long cellsChecked = 0;
     long gFrames = 0;
     do {
         globalSpills = 0;
@@ -201,13 +202,11 @@ stabilize(void)
                 localSpills = 0;
                 for (int localIdx = 0; localIdx < TILE_HEIGHT * TILE_WIDTH; localIdx++) {
                     unsigned short* v = &tiles[tileIdx][localIdx];
-                    assert(*v >= 0);
                     if (*v < 4) {
                         continue;
                     }
 
                     localSpills++;
-                    globalSpills++;
                     *v -= 4;
                     if (localIdx % TILE_WIDTH != TILE_WIDTH - 1) {
                         *(v + 1) += 1;
@@ -230,14 +229,16 @@ stabilize(void)
                         messages[message_idx(tileIdx, TOP)][localIdx % TILE_WIDTH] += 1;
                     }
                 }
+                globalSpills += localSpills;
+                cellsChecked += TILE_HEIGHT * TILE_WIDTH;
             } while (localSpills > 0);
         }
-
-        fprintf(stderr, "Total Spills: %ld\tGlobal Frames: %ld\n", globalSpills, ++gFrames);
 
         // TODO: remove
         // render();
     } while (globalSpills > 0);
+
+    fprintf(stderr, "Total Cells Checked:%ld\n", cellsChecked);
 }
 
 int
