@@ -17,7 +17,7 @@
 #include <string.h>
 
 #ifndef N
-#  define N 500
+#  define N 512
 #endif
 #ifndef SCALE
 #  define SCALE 1

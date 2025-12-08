@@ -6,6 +6,9 @@
 sand: my-sandpile.c
 	gcc -O3 -march=native -fopenmp my-sandpile.c -o sand
 
+np: np-sandpile.c
+	gcc -O3 -march=native -fopenmp np-sandpile.c -o np
+
 debug: my-sandpile.c
 	gcc -g3 -march=native -fopenmp my-sandpile.c -o sand-debug
 	gdb ./sand-debug

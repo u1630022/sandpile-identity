@@ -18,11 +18,11 @@
 #include <immintrin.h>
 
 #ifndef N
-#  define N 506
+#  define N 510
 #endif
 
-#define TILE_WIDTH 253
-#define TILE_HEIGHT 253
+#define TILE_WIDTH 85
+#define TILE_HEIGHT 85
 #define xTILES (N/TILE_WIDTH)
 #define yTILES (N/TILE_HEIGHT)
 
@@ -32,11 +32,11 @@
 #define RIGHT 3
 
 /* Color palette */
-#define C0 0xff9200
-#define C1 0xf53d52
-#define C2 0xfce315
-#define C3 0x44c5cb
-#define CX 0x000000
+#define C0 0x000000
+#define C1 0x333333
+#define C2 0x666666
+#define C3 0x999999
+#define CX 0xff0000
 
 static unsigned short** tiles;
 static int** messages;
@@ -113,8 +113,9 @@ render(void)
 static void
 stabilize(void)
 {
-    int globalSpills;
-    int localSpills;
+    long globalSpills;
+    long localSpills;
+    long gFrames = 0;
     do {
         globalSpills = 0;
         for (int tileIdx = 0; tileIdx < xTILES * yTILES; tileIdx++) {
@@ -231,6 +232,11 @@ stabilize(void)
                 }
             } while (localSpills > 0);
         }
+
+        fprintf(stderr, "Total Spills: %ld\tGlobal Frames: %ld\n", globalSpills, ++gFrames);
+
+        // TODO: remove
+        // render();
     } while (globalSpills > 0);
 }
 
