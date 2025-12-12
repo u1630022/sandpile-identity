@@ -30,6 +30,7 @@
 #define C3 0x44c5cb
 #define CX 0x000000
 
+#define __AVX2__
 #ifdef __AVX2__
 #  include <immintrin.h>
 #  define TAILSTART N/32*32
