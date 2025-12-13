@@ -36,6 +36,7 @@
 #define CX 0x000000
 
 __attribute__((aligned(32))) static unsigned char state[2+N][N];
+__attribute__((aligned(32))) static unsigned char state_copy[2+N][N];
 
 static void
 render(void)
@@ -180,7 +181,30 @@ stabilize(void)
 }
 
 int
-main(void)
+states_eq(void)
+{
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            if (state[1+y][x] != state_copy[1+y][x]) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+void
+states_copy(void)
+{
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            state_copy[1+y][x] = state[1+y][x];
+        }
+    }
+}
+
+void
+subtraction_algo(void)
 {
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
@@ -194,5 +218,45 @@ main(void)
         }
     }
     stabilize();
+}
+
+void
+exp_burning_algo(void)
+{
+    // init with the burning config
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            state[1+y][x] = 0;
+        }
+    }
+    for (int x = 0; x < N; x++) {
+        state[1][x] = 1;
+        state[N][x] = 1;
+    }
+    for (int y = 1; y < N-1; y++) {
+        state[1+y][0]   = 1;
+        state[1+y][N-1] = 1;
+    }
+    state[1][0]   = 2;
+    state[1][N-1] = 2;
+    state[N][0]   = 2;
+    state[N][N-1] = 2;
+
+    do {
+        states_copy();
+        for (int y = 0; y < N; y++) {
+            for (int x = 0; x < N; x++) {
+                state[1+y][x] *= 2;
+            }
+        }
+        stabilize();
+        // render();
+    } while (!states_eq());
+}
+
+int
+main(void)
+{
+    exp_burning_algo();
     render();
 }
