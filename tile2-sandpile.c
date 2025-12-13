@@ -35,7 +35,7 @@
 #define CA4 0xff0000
 #define CX 0x000000
 
-__attribute__((aligned(32))) static unsigned short state[2+N][N];
+__attribute__((aligned(32))) static unsigned char state[2+N][N];
 
 static void
 render(void)
@@ -64,16 +64,17 @@ render(void)
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
 // Retrieved 2025-12-11, License - CC BY-SA 3.0
 static __m256i
-m256_srl16_1(__m256i i) {
-    // suppose i is [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+m256_srl8_1(__m256i i) {
+    // suppose i is [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+    //               16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
 
-    //[4, 3, 2, 1,      16, 15, 14, 13,   12, 11, 10, 9,   8, 7, 6, 5]
+    //[87654321,  3231302928272625,   2423222120191817,   161514131211109]
     __m256i srl64_q = _mm256_permute4x64_epi64(i, _MM_SHUFFLE(0,3,2,1));
 
     //[ 1, 0, 0, 0      13, 0, 0, 0       9, 0, 0, 0       5, 0, 0, 0]
-    __m256i srl64_m = _mm256_slli_epi64(srl64_q, 3*16);
+    __m256i srl64_m = _mm256_slli_epi64(srl64_q, 7*8);
     //[ 0, 16, 15, 14,  0, 12, 11, 10,    0, 8, 7, 6,      0, 4, 3, 2]
-    __m256i srl16_z = _mm256_srli_epi64(i, 1*16);
+    __m256i srl16_z = _mm256_srli_epi64(i, 8);
 
     __m256i srl64 = _mm256_and_si256(srl64_m, _mm256_set_epi64x(0, ~0, ~0, ~0));
     __m256i r = _mm256_or_si256(srl64, srl16_z);
@@ -82,16 +83,16 @@ m256_srl16_1(__m256i i) {
 }
 
 static __m256i
-m256_sll16_1(__m256i i) {
+m256_sll8_1(__m256i i) {
     // suppose i is [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
 
     //[12, 11, 10, 9,   8, 7, 6, 5,    4, 3, 2, 1,    16, 15, 14, 13]
     __m256i srl64_q = _mm256_permute4x64_epi64(i, _MM_SHUFFLE(2,1,0,3));
 
     //[0, 0, 0, 12,   0, 0, 0, 8,    0, 0, 0, 4,    0, 0, 0, 16]
-    __m256i srl64_m = _mm256_srli_epi64(srl64_q, 3*16);
+    __m256i srl64_m = _mm256_srli_epi64(srl64_q, 7*8);
     //[15, 14, 13, 0  11, 10, 9, 0    7, 6, 5, 0,      3, 2, 1, 0]
-    __m256i srl16_z = _mm256_slli_epi64(i, 1*16);
+    __m256i srl16_z = _mm256_slli_epi64(i, 1*8);
 
     __m256i srl64 = _mm256_and_si256(srl64_m, _mm256_set_epi64x(~0, ~0, ~0, 0));
     __m256i r = _mm256_or_si256(srl64, srl16_z);
@@ -99,13 +100,13 @@ m256_sll16_1(__m256i i) {
     return r;
 }
 
-__attribute__((aligned(32))) unsigned short sum_buffer[16];
+__attribute__((aligned(32))) unsigned char sum_buffer[32];
 
 static int
 m256_hadd_all(__m256i i) {
     int sum = 0;
     _mm256_store_si256((void *) &sum_buffer, i);
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 32; i++) {
         sum += sum_buffer[i];
     }
     return sum;
@@ -124,7 +125,7 @@ stabilize(void)
             for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
                 do {
                     localSpills = 0;
-                    __m256i vspills = _mm256_set1_epi16(0);
+                    __m256i vspills = _mm256_set1_epi8(0);
                     int ystart = (yy * TILE_HEIGHT) / 2;
                     int yend = ystart + TILE_HEIGHT;
                     for (int y = ystart; y < yend; y++) {
@@ -132,44 +133,46 @@ stabilize(void)
                         int xstart = (xx * TILE_WIDTH) / 2;
                         int xend = xstart + TILE_WIDTH;
 
-                        for (int x = xstart; x < xend; x += 16) {
+                        for (int x = xstart; x < xend; x += 32) {
                             __m256i vv = _mm256_load_si256((void *)&state[1+y][x]);
                             __m256i vvabove = _mm256_load_si256((void *)&state[y][x]);
                             __m256i vvbelow = _mm256_load_si256((void *)&state[2+y][x]);
                             __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
+                            vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
 
-                            vspills = _mm256_add_epi16(vinc, vspills);
+                            vspills = _mm256_add_epi8(vinc, vspills);
 
-                            _mm256_store_si256((void *)&state[y][x], _mm256_add_epi16(vvabove, vinc));
-                            _mm256_store_si256((void *)&state[2+y][x], _mm256_add_epi16(vvbelow, vinc));
+                            _mm256_store_si256((void *)&state[y][x], _mm256_add_epi8(vvabove, vinc));
+                            _mm256_store_si256((void *)&state[2+y][x], _mm256_add_epi8(vvbelow, vinc));
 
-                            __m256i vinc_left = m256_srl16_1(vinc);
-                            __m256i vinc_right = m256_sll16_1(vinc);
+                            __m256i vinc_left = m256_srl8_1(vinc);
+                            __m256i vinc_right = m256_sll8_1(vinc);
 
                             __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
-                            __m256i vv_new = _mm256_add_epi16(vinc_left, 
-                                    _mm256_add_epi16(vinc_right,
-                                    _mm256_sub_epi16(vv, vinc4)));
+                            __m256i vv_new = _mm256_add_epi8(vinc_left,
+                                    _mm256_add_epi8(vinc_right,
+                                    _mm256_sub_epi8(vv, vinc4)));
                             _mm256_store_si256((void *)&state[1+y][x], vv_new);
 
                             // tails
                             if (x - 1 > 0) {
-                                int left_spill = _mm256_extract_epi16(vinc, 0);
+                                int left_spill = _mm256_extract_epi8(vinc, 0);
                                 state[1+y][x-1] += left_spill;
                             }
-                            if (x + 16 < N) {
-                                int right_spill = _mm256_extract_epi16(vinc, 15);
-                                state[1+y][x+16] += right_spill;
+                            if (x + 32 < N) {
+                                int right_spill = _mm256_extract_epi8(vinc, 31);
+                                state[1+y][x+32] += right_spill;
                             }
                         }
                     }
                     cellsChecked += TILE_HEIGHT * TILE_WIDTH;
                     localSpills = m256_hadd_all(vspills);
                     spills += localSpills;
-                } while (localSpills > TILE_HEIGHT * TILE_WIDTH / 2);
+                } while (localSpills > TILE_HEIGHT * TILE_WIDTH / 4);
             }
         }
         totalSpills += spills;
+        // render();
     } while (spills > 0);
     // 8915347868
     // 3251067552
