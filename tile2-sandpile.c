@@ -204,6 +204,32 @@ states_copy(void)
 }
 
 void
+add_burning_config(void)
+{
+    for (int x = 0; x < N; x++) {
+        state[1][x] += 1;
+        state[N][x] += 1;
+    }
+    for (int y = 1; y < N-1; y++) {
+        state[1+y][0]   += 1;
+        state[1+y][N-1] += 1;
+    }
+    state[1][0]   += 1;
+    state[1][N-1] += 1;
+    state[N][0]   += 1;
+    state[N][N-1] += 1;
+}
+
+int
+is_identity(void)
+{
+    states_copy();
+    add_burning_config();
+    stabilize();
+    return states_eq();
+}
+
+void
 subtraction_algo(void)
 {
     for (int y = 0; y < N; y++) {
@@ -229,21 +255,9 @@ exp_burning_algo(void)
             state[1+y][x] = 0;
         }
     }
-    for (int x = 0; x < N; x++) {
-        state[1][x] = 1;
-        state[N][x] = 1;
-    }
-    for (int y = 1; y < N-1; y++) {
-        state[1+y][0]   = 1;
-        state[1+y][N-1] = 1;
-    }
-    state[1][0]   = 2;
-    state[1][N-1] = 2;
-    state[N][0]   = 2;
-    state[N][N-1] = 2;
+    add_burning_config();
 
     do {
-        states_copy();
         for (int y = 0; y < N; y++) {
             for (int x = 0; x < N; x++) {
                 state[1+y][x] *= 2;
@@ -251,7 +265,7 @@ exp_burning_algo(void)
         }
         stabilize();
         // render();
-    } while (!states_eq());
+    } while (!is_identity());
 }
 
 int
