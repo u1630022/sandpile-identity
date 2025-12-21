@@ -13,6 +13,7 @@
  * Ref: https://nullprogram.com/blog/2015/07/10/
  * Ref: https://www.youtube.com/watch?v=hBdJB-BzudU
  */
+#include <assert.h>
 #include <stdio.h>
 #include <immintrin.h>
 #include <emmintrin.h>
@@ -27,16 +28,32 @@
 #define TILE_WIDTH 64
 #define TILE_HEIGHT 8
 
-/* Color palette */
-#define C0 0xff9200
-#define C1 0xf53d52
-#define C2 0xfce315
-#define C3 0x44c5cb
-#define CA4 0xff0000
-#define CX 0x000000
+#define LEFT  0
+#define RIGHT 1
 
-__attribute__((aligned(32))) static unsigned char state[2+N][N];
-__attribute__((aligned(32))) static unsigned char state_copy[2+N][N];
+/* Color palette */
+#define C0 0x111111
+#define C1 0x444444
+#define C2 0x777777
+#define C3 0xaaaaaa
+#define CA4 0xff0000
+#define CX 0x0000ff
+
+__attribute__((aligned(64))) static unsigned char state[2+N][N];
+__attribute__((aligned(64))) static unsigned char state_copy[2+N][N];
+__attribute__((aligned(64))) static unsigned char messages[N / TILE_WIDTH][2][N];
+
+void
+zero_messages(void)
+{
+    for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < N; i++) {
+                messages[xx][dir][i] = 0;
+            }
+        }
+    }
+}
 
 static void
 render(void)
@@ -101,11 +118,11 @@ m256_sll8_1(__m256i i) {
     return r;
 }
 
-__attribute__((aligned(32))) unsigned char sum_buffer[32];
 
 static int
 m256_hadd_all(__m256i i) {
     int sum = 0;
+    __attribute__((aligned(32))) unsigned char sum_buffer[32];
     _mm256_store_si256((void *) &sum_buffer, i);
     for (int i = 0; i < 32; i++) {
         sum += sum_buffer[i];
@@ -122,7 +139,29 @@ stabilize(void)
     long totalSpills = 0;
     do {
         spills = 0;
-        for (int xx = 0; xx < 2*N / TILE_WIDTH - 1; xx++) {
+
+        #pragma omp parallel for private(localSpills) shared(cellsChecked, spills, totalSpills)
+        for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
+
+            // import from messages
+            for (int y = 0; y < N; y++) {
+                int tmp = 0;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[xx][LEFT][y];
+                    messages[xx][LEFT][y] = 0;
+                }
+                state[1+y][xx * TILE_WIDTH] += tmp;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[xx][RIGHT][y];
+                    messages[xx][RIGHT][y] = 0;
+                }
+                state[1+y][(xx + 1) * TILE_WIDTH - 1] += tmp;
+            }
+
             for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
                 do {
                     localSpills = 0;
@@ -131,7 +170,7 @@ stabilize(void)
                     int yend = ystart + TILE_HEIGHT;
                     for (int y = ystart; y < yend; y++) {
                         int xspills = 0;
-                        int xstart = (xx * TILE_WIDTH) / 2;
+                        int xstart = (xx * TILE_WIDTH);
                         int xend = xstart + TILE_WIDTH;
 
                         for (int x = xstart; x < xend; x += 32) {
@@ -155,26 +194,59 @@ stabilize(void)
                                     _mm256_sub_epi8(vv, vinc4)));
                             _mm256_store_si256((void *)&state[1+y][x], vv_new);
 
+                            // TODO: This logic only works for tile width 64
                             // tails
-                            if (x - 1 > 0) {
+                            if (x > xstart) {
                                 int left_spill = _mm256_extract_epi8(vinc, 0);
-                                state[1+y][x-1] += left_spill;
+                                state[1+y][x - 1] += left_spill;
+                            } else if (xx > 0) {
+                                int left_spill = _mm256_extract_epi8(vinc, 0);
+
+                                #pragma omp atomic update
+                                messages[xx - 1][RIGHT][y] += left_spill;
                             }
-                            if (x + 32 < N) {
+                            if (x == xstart) {
                                 int right_spill = _mm256_extract_epi8(vinc, 31);
                                 state[1+y][x+32] += right_spill;
+                            } else if (xx < N / TILE_WIDTH - 1) {
+                                int right_spill = _mm256_extract_epi8(vinc, 31);
+
+                                #pragma omp atomic update
+                                messages[xx + 1][LEFT][y] += right_spill;
                             }
                         }
                     }
-                    cellsChecked += TILE_HEIGHT * TILE_WIDTH;
                     localSpills = m256_hadd_all(vspills);
+                    assert(localSpills >= 0);
+
+                    #pragma omp atomic update
                     spills += localSpills;
+
+                    #pragma omp atomic update
+                    cellsChecked += TILE_HEIGHT * TILE_WIDTH;
                 } while (localSpills > TILE_HEIGHT * TILE_WIDTH / 4);
             }
         }
+
+        assert(spills >= 0);
         totalSpills += spills;
         // render();
     } while (spills > 0);
+
+    for (int xx = 1; xx < N / TILE_WIDTH - 1; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < N; i++) {
+                assert(messages[xx][dir][i] == 0);
+            }
+        }
+    }
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            assert(state[1+y][x] < 4);
+            assert(state[1+y][x] >= 0);
+        }
+    }
+
     // 8915347868
     // 3251067552
     fprintf(stderr, "Total Cells Checked: %ld\tTotal Spills: %ld\n", cellsChecked, totalSpills);
@@ -255,6 +327,7 @@ exp_burning_algo(void)
             state[1+y][x] = 0;
         }
     }
+    zero_messages();
     add_burning_config();
 
     do {
@@ -264,7 +337,7 @@ exp_burning_algo(void)
             }
         }
         stabilize();
-        // render();
+        render();
     } while (!is_identity());
 }
 
@@ -272,5 +345,5 @@ int
 main(void)
 {
     exp_burning_algo();
-    render();
+    // render();
 }
