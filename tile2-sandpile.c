@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <immintrin.h>
 #include <emmintrin.h>
+#include <omp.h>
 
 #ifndef N
 #  define N 512
@@ -133,15 +134,17 @@ m256_hadd_all(__m256i i) {
 static void
 stabilize(void)
 {
-    long cellsChecked = 0;
+    long tileSpills = 0;
+    long threadSpills = 0;
     long spills = 0;
-    long localSpills = 0;
     long totalSpills = 0;
     do {
         spills = 0;
 
-        #pragma omp parallel for private(localSpills) shared(cellsChecked, spills, totalSpills)
+        #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
         for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
+
+            threadSpills = 0;
 
             // import from messages
             for (int y = 0; y < N; y++) {
@@ -164,7 +167,7 @@ stabilize(void)
 
             for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
                 do {
-                    localSpills = 0;
+                    tileSpills = 0;
                     __m256i vspills = _mm256_set1_epi8(0);
                     int ystart = (yy * TILE_HEIGHT) / 2;
                     int yend = ystart + TILE_HEIGHT;
@@ -216,16 +219,18 @@ stabilize(void)
                             }
                         }
                     }
-                    localSpills = m256_hadd_all(vspills);
-                    assert(localSpills >= 0);
+                    tileSpills = m256_hadd_all(vspills);
+                    assert(tileSpills >= 0);
 
-                    #pragma omp atomic update
-                    spills += localSpills;
+                    threadSpills += tileSpills;
 
-                    #pragma omp atomic update
-                    cellsChecked += TILE_HEIGHT * TILE_WIDTH;
-                } while (localSpills > TILE_HEIGHT * TILE_WIDTH / 4);
+                    // #pragma omp atomic update
+                    // cellsChecked += TILE_HEIGHT * TILE_WIDTH;
+                } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
             }
+
+            #pragma omp atomic update
+            spills += threadSpills;
         }
 
         assert(spills >= 0);
@@ -249,7 +254,7 @@ stabilize(void)
 
     // 8915347868
     // 3251067552
-    fprintf(stderr, "Total Cells Checked: %ld\tTotal Spills: %ld\n", cellsChecked, totalSpills);
+    fprintf(stderr, "Total Spills: %ld\n", totalSpills);
 }
 
 int
@@ -337,13 +342,14 @@ exp_burning_algo(void)
             }
         }
         stabilize();
-        render();
+        // render();
     } while (!is_identity());
 }
 
 int
 main(void)
 {
+    omp_set_num_threads(8);
     exp_burning_algo();
     // render();
 }
