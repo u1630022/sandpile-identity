@@ -20,9 +20,6 @@
 #include <omp.h>
 #include <locale.h>
 
-#ifndef N
-#  define N 512
-#endif
 #ifndef SCALE
 #  define SCALE 1
 #endif
@@ -41,12 +38,11 @@
 #define CA4 0xff0000
 #define CX 0x0000ff
 
-__attribute__((aligned(64))) static unsigned char state[2+N][N];
-__attribute__((aligned(64))) static unsigned char state_copy[2+N][N];
-__attribute__((aligned(64))) static unsigned char messages[N / TILE_WIDTH][2][N];
+static const long ALIGNMENT = 64;
 
 void
-zero_messages(void)
+zero_messages(int N,
+              unsigned char messages[N / TILE_WIDTH][2][N])
 {
     for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
         for (int dir = LEFT; dir <= RIGHT; dir++) {
@@ -58,9 +54,10 @@ zero_messages(void)
 }
 
 static void
-render(void)
+render(int N,
+       unsigned char state[2+N][N])
 {
-    static unsigned char buf[3L*N*SCALE*N*SCALE];
+    unsigned char buf[3L*N*SCALE*N*SCALE];
     static const long colors[] = {C0, C1, C2, C3};
     for (int y = 0; y < N*SCALE; y++) {
         for (int x = 0; x < N*SCALE; x++) {
@@ -71,6 +68,33 @@ render(void)
             } else if (v >= 0) {
                 c = colors[v];
             }
+            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
+            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
+            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
+        }
+    }
+    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
+    fwrite(buf, sizeof(buf), 1, stdout);
+}
+
+static void
+render_diff(int N,
+            char diff[2+N][N])
+{
+    unsigned char buf[3L*N*SCALE*N*SCALE];
+    static const long colors[] = {
+        0x0d0887,
+        0x5c01a6,
+        0x5c01a6,
+        0xcc4778,
+        0xed7953,
+        0xfdb42f,
+        0xf0f921
+    };
+    for (int y = 0; y < N*SCALE; y++) {
+        for (int x = 0; x < N*SCALE; x++) {
+            int v = diff[1+y/SCALE][x/SCALE];
+            long c = colors[v + 3];
             buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
             buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
             buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
@@ -133,7 +157,9 @@ m256_hadd_all(__m256i i) {
 }
 
 static void
-stabilize(void)
+stabilize(int N,
+          unsigned char state[2+N][N],
+          unsigned char messages[N / TILE_WIDTH][2][N])
 {
     long tileSpills = 0;
     long threadSpills = 0;
@@ -258,7 +284,9 @@ stabilize(void)
 }
 
 int
-states_eq(void)
+states_eq(int N,
+          unsigned char state[2+N][N],
+          unsigned char state_copy[2+N][N])
 {
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
@@ -271,7 +299,9 @@ states_eq(void)
 }
 
 void
-states_copy(void)
+states_copy(int N,
+            unsigned char state[2+N][N],
+            unsigned char state_copy[2+N][N])
 {
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
@@ -281,7 +311,8 @@ states_copy(void)
 }
 
 void
-add_burning_config(void)
+add_burning_config(int N,
+                   unsigned char state[2+N][N])
 {
     for (int x = 0; x < N; x++) {
         state[1][x] += 1;
@@ -298,33 +329,41 @@ add_burning_config(void)
 }
 
 int
-is_identity(void)
+is_identity(int N,
+            unsigned char state[2+N][N],
+            unsigned char state_copy[2+N][N],
+            unsigned char messages[N / TILE_WIDTH][2][N])
 {
-    states_copy();
-    add_burning_config();
-    stabilize();
-    return states_eq();
+    states_copy(N, state, state_copy);
+    add_burning_config(N, state);
+    stabilize(N, state, messages);
+    return states_eq(N, state, state_copy);
 }
 
 void
-subtraction_algo(void)
+subtraction_algo(int N,
+                 unsigned char state[2+N][N],
+                 unsigned char messages[N / TILE_WIDTH][2][N])
 {
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
             state[1+y][x] = 6;
         }
     }
-    stabilize();
+    stabilize(N, state, messages);
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < N; x++) {
             state[1+y][x] = 6 - state[1+y][x];
         }
     }
-    stabilize();
+    stabilize(N, state, messages);
 }
 
 void
-exp_burning_algo(void)
+exp_burning_algo(int N,
+                 unsigned char state[2+N][N],
+                 unsigned char state_copy[2+N][N],
+                 unsigned char messages[N / TILE_WIDTH][2][N])
 {
     // init with the burning config
     for (int y = 0; y < N; y++) {
@@ -332,8 +371,8 @@ exp_burning_algo(void)
             state[1+y][x] = 0;
         }
     }
-    zero_messages();
-    add_burning_config();
+    zero_messages(N, messages);
+    add_burning_config(N, state);
 
     do {
         for (int y = 0; y < N; y++) {
@@ -341,9 +380,9 @@ exp_burning_algo(void)
                 state[1+y][x] *= 2;
             }
         }
-        stabilize();
+        stabilize(N, state, messages);
         // render();
-    } while (!is_identity());
+    } while (!is_identity(N, state, state_copy, messages));
 }
 
 int
@@ -351,6 +390,26 @@ main(void)
 {
     setlocale(LC_ALL, "");
     omp_set_num_threads(8);
-    exp_burning_algo();
-    // render();
+
+    int N1 = 512;
+    __attribute__((aligned(64))) unsigned char state[2+N1][N1];
+    __attribute__((aligned(64))) unsigned char state_copy[2+N1][N1];
+    __attribute__((aligned(64))) unsigned char messages[N1 / TILE_WIDTH][2][N1];
+
+    int N2 = 256;
+    __attribute__((aligned(64))) unsigned char state2[2+N2][N2];
+    __attribute__((aligned(64))) unsigned char state_copy2[2+N2][N2];
+    __attribute__((aligned(64))) unsigned char messages2[N2 / TILE_WIDTH][2][N2];
+
+    exp_burning_algo(N1, state, state_copy, messages);
+    exp_burning_algo(N2, state2, state_copy2, messages2);
+
+    char diff[2+N1][N1];
+    for (int y = 0; y < N1; y++) {
+        for (int x = 0; x < N1; x++) {
+            diff[1+y][x] = state[1+y][x] - state2[1+(y/2)][x/2];
+        }
+    }
+
+    render_diff(N1, diff);
 }
