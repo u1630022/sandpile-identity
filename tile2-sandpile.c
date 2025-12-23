@@ -18,6 +18,7 @@
 #include <immintrin.h>
 #include <emmintrin.h>
 #include <omp.h>
+#include <locale.h>
 
 #ifndef N
 #  define N 512
@@ -197,7 +198,6 @@ stabilize(void)
                                     _mm256_sub_epi8(vv, vinc4)));
                             _mm256_store_si256((void *)&state[1+y][x], vv_new);
 
-                            // TODO: This logic only works for tile width 64
                             // tails
                             if (x > xstart) {
                                 int left_spill = _mm256_extract_epi8(vinc, 0);
@@ -208,7 +208,7 @@ stabilize(void)
                                 #pragma omp atomic update
                                 messages[xx - 1][RIGHT][y] += left_spill;
                             }
-                            if (x == xstart) {
+                            if (x < xend - 32) {
                                 int right_spill = _mm256_extract_epi8(vinc, 31);
                                 state[1+y][x+32] += right_spill;
                             } else if (xx < N / TILE_WIDTH - 1) {
@@ -254,7 +254,7 @@ stabilize(void)
 
     // 8915347868
     // 3251067552
-    fprintf(stderr, "Total Spills: %ld\n", totalSpills);
+    fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
 }
 
 int
@@ -349,6 +349,7 @@ exp_burning_algo(void)
 int
 main(void)
 {
+    setlocale(LC_ALL, "");
     omp_set_num_threads(8);
     exp_burning_algo();
     // render();
