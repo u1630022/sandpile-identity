@@ -14,11 +14,14 @@
  * Ref: https://www.youtube.com/watch?v=hBdJB-BzudU
  */
 #include <assert.h>
-#include <stdio.h>
-#include <immintrin.h>
+#include <gsl/gsl_linalg.h>
+#include <gsl/gsl_matrix.h>
 #include <emmintrin.h>
-#include <omp.h>
+#include <immintrin.h>
 #include <locale.h>
+#include <math.h>
+#include <stdio.h>
+#include <omp.h>
 
 #ifndef SCALE
 #  define SCALE 1
@@ -39,6 +42,74 @@
 #define CX 0x0000ff
 
 static const long ALIGNMENT = 64;
+
+// Inferno palette
+static const long inferno[254] = {
+    0x000006, 0x010007, 0x010109, 0x01010b,
+    0x02010e, 0x020210, 0x030212, 0x040314,
+    0x040316, 0x050418, 0x06041b, 0x07051d,
+    0x08061f, 0x090621, 0x0a0724, 0x0c0726,
+    0x0d0828, 0x0e082b, 0x0f092d, 0x10092f,
+    0x120a32, 0x130a34, 0x140b37, 0x160b39,
+    0x170b3b, 0x190b3e, 0x1a0c40, 0x1c0c43,
+    0x1d0c45, 0x1f0c48, 0x210c4a, 0x220b4c,
+    0x240b4e, 0x260b51, 0x270b53, 0x290b55,
+    0x2b0a57, 0x2d0a59, 0x2e0a5a, 0x300a5c,
+    0x32095e, 0x34095f, 0x360960, 0x370962,
+    0x390963, 0x3b0964, 0x3c0965, 0x3e0966,
+    0x400967, 0x420968, 0x430a68, 0x450a69,
+    0x470a6a, 0x480b6a, 0x4a0b6b, 0x4c0c6b,
+    0x4d0c6c, 0x4f0d6c, 0x500d6c, 0x520e6d,
+    0x540e6d, 0x550f6d, 0x570f6d, 0x59106e,
+    0x5a116e, 0x5c116e, 0x5d126e, 0x5f126e,
+    0x61136e, 0x62146e, 0x64146e, 0x65156e,
+    0x67156e, 0x68166e, 0x6a176e, 0x6c176e,
+    0x6d186e, 0x6f186e, 0x70196e, 0x721a6e,
+    0x741a6e, 0x751b6e, 0x771b6d, 0x781c6d,
+    0x7a1c6d, 0x7c1d6d, 0x7d1d6c, 0x7f1e6c,
+    0x801f6c, 0x821f6c, 0x84206b, 0x85206b,
+    0x87216b, 0x88216a, 0x8a226a, 0x8c2369,
+    0x8d2369, 0x8f2468, 0x902468, 0x922568,
+    0x942567, 0x952667, 0x972766, 0x982765,
+    0x9a2865, 0x9b2864, 0x9d2964, 0x9f2a63,
+    0xa02a62, 0xa22b62, 0xa32b61, 0xa52c60,
+    0xa72d60, 0xa82d5f, 0xaa2e5e, 0xab2f5d,
+    0xad2f5d, 0xae305c, 0xb0315b, 0xb1315a,
+    0xb33259, 0xb43359, 0xb63458, 0xb73457,
+    0xb93556, 0xba3655, 0xbc3754, 0xbd3853,
+    0xbf3852, 0xc03951, 0xc23a50, 0xc33b4f,
+    0xc53c4e, 0xc63d4d, 0xc73e4c, 0xc93f4b,
+    0xca404a, 0xcb4149, 0xcd4248, 0xce4347,
+    0xcf4446, 0xd14545, 0xd24644, 0xd34743,
+    0xd54841, 0xd64940, 0xd74a3f, 0xd84c3e,
+    0xd94d3d, 0xdb4e3c, 0xdc4f3b, 0xdd5139,
+    0xde5238, 0xdf5337, 0xe05536, 0xe15635,
+    0xe25733, 0xe35932, 0xe45a31, 0xe55b30,
+    0xe65d2f, 0xe75e2d, 0xe8602c, 0xe9612b,
+    0xea632a, 0xeb6428, 0xec6627, 0xed6726,
+    0xed6925, 0xee6a23, 0xef6c22, 0xf06e21,
+    0xf16f20, 0xf1711e, 0xf2721d, 0xf3741c,
+    0xf3761a, 0xf47719, 0xf47918, 0xf57b16,
+    0xf67d15, 0xf67e14, 0xf78012, 0xf78211,
+    0xf88410, 0xf8850e, 0xf8870d, 0xf9890c,
+    0xf98b0b, 0xfa8d09, 0xfa8e08, 0xfa9008,
+    0xfb9207, 0xfb9406, 0xfb9606, 0xfb9806,
+    0xfc9906, 0xfc9b06, 0xfc9d06, 0xfc9f07,
+    0xfca107, 0xfca308, 0xfca50a, 0xfca70b,
+    0xfca90d, 0xfcaa0e, 0xfcac10, 0xfcae12,
+    0xfcb014, 0xfcb216, 0xfcb418, 0xfcb61a,
+    0xfcb81c, 0xfcba1e, 0xfbbc21, 0xfbbe23,
+    0xfbc025, 0xfbc228, 0xfac42a, 0xfac62d,
+    0xfac82f, 0xf9ca32, 0xf9cc34, 0xf9ce37,
+    0xf8d03a, 0xf8d23d, 0xf7d43f, 0xf7d642,
+    0xf6d845, 0xf6d949, 0xf5db4c, 0xf5dd4f,
+    0xf4df52, 0xf4e156, 0xf4e359, 0xf3e55d,
+    0xf3e761, 0xf2e965, 0xf2ea69, 0xf2ec6d,
+    0xf2ee71, 0xf2ef75, 0xf2f179, 0xf2f37d,
+    0xf3f482, 0xf3f586, 0xf4f78a, 0xf5f88e,
+    0xf6f992, 0xf7fb96, 0xf8fc9a, 0xf9fd9d,
+    0xfbfea1, 0xfdffa5
+};
 
 void
 zero_messages(int N,
@@ -95,6 +166,39 @@ render_diff(int N,
         for (int x = 0; x < N*SCALE; x++) {
             int v = diff[1+y/SCALE][x/SCALE];
             long c = colors[v + 3];
+            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
+            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
+            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
+        }
+    }
+    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
+    fwrite(buf, sizeof(buf), 1, stdout);
+}
+
+static void
+renderl(int N,
+        long grid[2+N][N])
+{
+    unsigned char buf[3L*N*SCALE*N*SCALE];
+    double min = LONG_MAX;
+    double max = LONG_MIN;
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            long v = grid[1+y][x];
+            if (v < min) {
+                min = v;
+            }
+            if (v > max) {
+                max = v;
+            }
+        }
+    }
+    fprintf(stderr, "Min: %lf\t Max: %lf\n", min, max);
+    for (int y = 0; y < N*SCALE; y++) {
+        for (int x = 0; x < N*SCALE; x++) {
+            long v = grid[1+y/SCALE][x/SCALE];
+            int idx = (int) (floor(254.0 * (v - min) / (max - min)));
+            long c = inferno[idx];
             buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
             buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
             buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
@@ -283,6 +387,85 @@ stabilize(int N,
     fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
 }
 
+gsl_matrix*
+rlapacian(int N)
+{
+    int n2 = N * N;
+    gsl_matrix *lap = gsl_matrix_alloc(n2, n2);
+    for (int i = 0; i < n2; i++) {
+        for (int j = 0; j < n2; j++) {
+            double val = 0;
+            int ix = i % N;
+            int iy = i / N;
+            int jx = j % N;
+            int jy = j / N;
+            if (i == j) {
+                val = -4;
+            }
+            if ((abs(ix - jx) == 1 && iy == jy) ||
+                (abs(iy - jy) == 1 && ix == jx)) {
+                val = 1;
+            }
+            gsl_matrix_set(lap, i, j, val);
+        }
+    }
+
+    return lap;
+}
+
+gsl_matrix*
+invert(gsl_matrix* m)
+{
+    int n = m->size1;
+    int s;
+    gsl_matrix *inv = gsl_matrix_alloc(n, n);
+    gsl_permutation *perm = gsl_permutation_alloc(n);
+
+    fprintf(stderr, "LU Decomposition\n");
+    gsl_linalg_LU_decomp(m, perm, &s);
+    fprintf(stderr, "LU Inversion\n");
+    gsl_linalg_LU_invert(m, perm, inv);
+
+    gsl_permutation_free(perm);
+    return inv;
+}
+
+void
+odometer(int N,
+         unsigned char state[2+N][N],
+         long output[2+N][N])
+{
+    fprintf(stderr, "Building reduced lapacian\n");
+    gsl_matrix* lapacian = rlapacian(N);
+    fprintf(stderr, "Inverting\n");
+    gsl_matrix* inv_lap = invert(lapacian);
+
+    gsl_vector *chips = gsl_vector_alloc(N * N);
+    gsl_vector *fires = gsl_vector_alloc(N * N);
+
+    for (int x = 0; x < N; x++) {
+        for (int y = 0; y < N; y++) {
+            int idx = y * N + x;
+            gsl_vector_set(chips, idx, (double) state[1+y][x]);
+        }
+    }
+
+    // Perform the matrix-vector product: fires = L^-1 * chips
+    // Parameters: CblasNoTrans (no transpose), 1.0 (alpha), A, x, 0.0 (beta), y
+    fprintf(stderr, "Matrix Vector product\n");
+    gsl_blas_dgemv(CblasNoTrans, 1.0, inv_lap, chips, 0.0, fires);
+
+    for (int x = 0; x < N; x++) {
+        for (int y = 0; y < N; y++) {
+            int idx = y * N + x;
+            output[1+y][x] = (long) round(gsl_vector_get(fires, idx));
+        }
+    }
+
+    gsl_vector_free(chips);
+    gsl_vector_free(fires);
+}
+
 int
 states_eq(int N,
           unsigned char state[2+N][N],
@@ -389,27 +572,16 @@ int
 main(void)
 {
     setlocale(LC_ALL, "");
-    omp_set_num_threads(8);
+    omp_set_num_threads(1);
 
-    int N1 = 512;
+    int N1 = 64;
     __attribute__((aligned(64))) unsigned char state[2+N1][N1];
     __attribute__((aligned(64))) unsigned char state_copy[2+N1][N1];
     __attribute__((aligned(64))) unsigned char messages[N1 / TILE_WIDTH][2][N1];
-
-    int N2 = 256;
-    __attribute__((aligned(64))) unsigned char state2[2+N2][N2];
-    __attribute__((aligned(64))) unsigned char state_copy2[2+N2][N2];
-    __attribute__((aligned(64))) unsigned char messages2[N2 / TILE_WIDTH][2][N2];
+    __attribute__((aligned(64))) long odo[2+N1][N1];
 
     exp_burning_algo(N1, state, state_copy, messages);
-    exp_burning_algo(N2, state2, state_copy2, messages2);
+    odometer(N1, state, odo);
 
-    char diff[2+N1][N1];
-    for (int y = 0; y < N1; y++) {
-        for (int x = 0; x < N1; x++) {
-            diff[1+y][x] = state[1+y][x] - state2[1+(y/2)][x/2];
-        }
-    }
-
-    render_diff(N1, diff);
+    renderl(N1, odo);
 }
