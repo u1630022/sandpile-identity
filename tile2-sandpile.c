@@ -14,8 +14,7 @@
  * Ref: https://www.youtube.com/watch?v=hBdJB-BzudU
  */
 #include <assert.h>
-#include <gsl/gsl_linalg.h>
-#include <gsl/gsl_matrix.h>
+#include <limits.h>
 #include <emmintrin.h>
 #include <immintrin.h>
 #include <locale.h>
@@ -111,21 +110,22 @@ static const long inferno[254] = {
     0xfbfea1, 0xfdffa5
 };
 
-void
-zero_messages(int N,
-              unsigned char messages[N / TILE_WIDTH][2][N])
-{
-    for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
-        for (int dir = LEFT; dir <= RIGHT; dir++) {
-            for (int i = 0; i < N; i++) {
-                messages[xx][dir][i] = 0;
-            }
-        }
-    }
+#define zero_messages_type(t) \
+void \
+zero_messages(int N, \
+              t messages[N / TILE_WIDTH][2][N]) \
+{ \
+    for (int xx = 0; xx < N / TILE_WIDTH; xx++) { \
+        for (int dir = LEFT; dir <= RIGHT; dir++) { \
+            for (int i = 0; i < N; i++) { \
+                messages[xx][dir][i] = 0; \
+            } \
+        } \
+    } \
 }
 
 static void
-render(int N,
+render_colour(int N,
        unsigned char state[2+N][N])
 {
     unsigned char buf[3L*N*SCALE*N*SCALE];
@@ -148,65 +148,32 @@ render(int N,
     fwrite(buf, sizeof(buf), 1, stdout);
 }
 
-static void
-render_diff(int N,
-            char diff[2+N][N])
-{
-    unsigned char buf[3L*N*SCALE*N*SCALE];
-    static const long colors[] = {
-        0x0d0887,
-        0x5c01a6,
-        0x5c01a6,
-        0xcc4778,
-        0xed7953,
-        0xfdb42f,
-        0xf0f921
-    };
-    for (int y = 0; y < N*SCALE; y++) {
-        for (int x = 0; x < N*SCALE; x++) {
-            int v = diff[1+y/SCALE][x/SCALE];
-            long c = colors[v + 3];
-            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
-            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
-            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
-        }
-    }
-    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
-    fwrite(buf, sizeof(buf), 1, stdout);
-}
-
-static void
-renderl(int N,
-        long grid[2+N][N])
-{
-    unsigned char buf[3L*N*SCALE*N*SCALE];
-    double min = LONG_MAX;
-    double max = LONG_MIN;
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            long v = grid[1+y][x];
-            if (v < min) {
-                min = v;
-            }
-            if (v > max) {
-                max = v;
-            }
-        }
-    }
-    fprintf(stderr, "Min: %lf\t Max: %lf\n", min, max);
-    for (int y = 0; y < N*SCALE; y++) {
-        for (int x = 0; x < N*SCALE; x++) {
-            long v = grid[1+y/SCALE][x/SCALE];
-            int idx = (int) (floor(254.0 * (v - min) / (max - min)));
-            long c = inferno[idx];
-            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
-            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
-            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
-        }
-    }
-    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
-    fwrite(buf, sizeof(buf), 1, stdout);
-}
+#define render(N, grid)  unsigned char buf[3L*N*SCALE*N*SCALE]; \
+                          double min = LONG_MAX; \
+                          double max = LONG_MIN; \
+                          for (int y = 0; y < N; y++) { \
+                              for (int x = 0; x < N; x++) { \
+                                  long v = grid[1+y][x]; \
+                                  if (v < min) { \
+                                      min = v; \
+                                  } \
+                                  if (v > max) { \
+                                      max = v; \
+                                  } \
+                              } \
+                          } \
+                          for (int y = 0; y < N*SCALE; y++) { \
+                              for (int x = 0; x < N*SCALE; x++) { \
+                                  long v = grid[1+y/SCALE][x/SCALE]; \
+                                  int idx = (int) (floor(254.0 * (v - min) / (max - min))); \
+                                  long c = inferno[idx]; \
+                                  buf[y*3L*SCALE*N + x*3L + 0] = c >> 16; \
+                                  buf[y*3L*SCALE*N + x*3L + 1] = c >>  8; \
+                                  buf[y*3L*SCALE*N + x*3L + 2] = c >>  0; \
+                              } \
+                          } \
+                          printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE); \
+                          fwrite(buf, sizeof(buf), 1, stdout);
 
 // Source - https://stackoverflow.com/a
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
@@ -223,6 +190,24 @@ m256_srl8_1(__m256i i) {
     __m256i srl64_m = _mm256_slli_epi64(srl64_q, 7*8);
     //[ 0, 16, 15, 14,  0, 12, 11, 10,    0, 8, 7, 6,      0, 4, 3, 2]
     __m256i srl16_z = _mm256_srli_epi64(i, 8);
+
+    __m256i srl64 = _mm256_and_si256(srl64_m, _mm256_set_epi64x(0, ~0, ~0, ~0));
+    __m256i r = _mm256_or_si256(srl64, srl16_z);
+
+    return r;
+}
+
+static __m256i
+m256_srl32_1(__m256i i) {
+    // suppose i is [8, 7, 6, 5, 4, 3, 2, 1]
+
+    //[2 1   8 7     6 5     2 1]
+    __m256i srl64_q = _mm256_permute4x64_epi64(i, _MM_SHUFFLE(0,3,2,1));
+
+    //[1 0   7 0     5 0     3 0]
+    __m256i srl64_m = _mm256_slli_epi64(srl64_q, 4*8);
+    //[0 8   0 6     0 4     0 2]
+    __m256i srl16_z = _mm256_srli_epi64(i, 4*8);
 
     __m256i srl64 = _mm256_and_si256(srl64_m, _mm256_set_epi64x(0, ~0, ~0, ~0));
     __m256i r = _mm256_or_si256(srl64, srl16_z);
@@ -248,6 +233,23 @@ m256_sll8_1(__m256i i) {
     return r;
 }
 
+static __m256i
+m256_sll32_1(__m256i i) {
+    // suppose i is [8, 7, 6, 5, 4, 3, 2, 1]
+
+    //[6 5    4 3    2 1    8 7]
+    __m256i srl64_q = _mm256_permute4x64_epi64(i, _MM_SHUFFLE(2,1,0,3));
+
+    //[0 6    0 4    0 2    0 8]
+    __m256i srl64_m = _mm256_srli_epi64(srl64_q, 4*8);
+    //[7 0    5 0    3 0    1 0]
+    __m256i srl16_z = _mm256_slli_epi64(i, 4*8);
+
+    __m256i srl64 = _mm256_and_si256(srl64_m, _mm256_set_epi64x(~0, ~0, ~0, 0));
+    __m256i r = _mm256_or_si256(srl64, srl16_z);
+
+    return r;
+}
 
 static int
 m256_hadd_all(__m256i i) {
@@ -261,9 +263,9 @@ m256_hadd_all(__m256i i) {
 }
 
 static void
-stabilize(int N,
-          unsigned char state[2+N][N],
-          unsigned char messages[N / TILE_WIDTH][2][N])
+stabilize_small(int N,
+                unsigned char state[2+N][N],
+                unsigned char messages[N / TILE_WIDTH][2][N])
 {
     long tileSpills = 0;
     long threadSpills = 0;
@@ -350,12 +352,7 @@ stabilize(int N,
                         }
                     }
                     tileSpills = m256_hadd_all(vspills);
-                    assert(tileSpills >= 0);
-
                     threadSpills += tileSpills;
-
-                    // #pragma omp atomic update
-                    // cellsChecked += TILE_HEIGHT * TILE_WIDTH;
                 } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
             }
 
@@ -387,201 +384,263 @@ stabilize(int N,
     fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
 }
 
-gsl_matrix*
-rlapacian(int N)
+static void
+stabilize_big(int N,
+              int state[2+N][N],
+              int messages[N / TILE_WIDTH][2][N])
 {
-    int n2 = N * N;
-    gsl_matrix *lap = gsl_matrix_alloc(n2, n2);
-    for (int i = 0; i < n2; i++) {
-        for (int j = 0; j < n2; j++) {
-            double val = 0;
-            int ix = i % N;
-            int iy = i / N;
-            int jx = j % N;
-            int jy = j / N;
-            if (i == j) {
-                val = -4;
-            }
-            if ((abs(ix - jx) == 1 && iy == jy) ||
-                (abs(iy - jy) == 1 && ix == jx)) {
-                val = 1;
-            }
-            gsl_matrix_set(lap, i, j, val);
-        }
-    }
-
-    return lap;
-}
-
-gsl_matrix*
-invert(gsl_matrix* m)
-{
-    int n = m->size1;
-    int s;
-    gsl_matrix *inv = gsl_matrix_alloc(n, n);
-    gsl_permutation *perm = gsl_permutation_alloc(n);
-
-    fprintf(stderr, "LU Decomposition\n");
-    gsl_linalg_LU_decomp(m, perm, &s);
-    fprintf(stderr, "LU Inversion\n");
-    gsl_linalg_LU_invert(m, perm, inv);
-
-    gsl_permutation_free(perm);
-    return inv;
-}
-
-void
-odometer(int N,
-         unsigned char state[2+N][N],
-         long output[2+N][N])
-{
-    fprintf(stderr, "Building reduced lapacian\n");
-    gsl_matrix* lapacian = rlapacian(N);
-    fprintf(stderr, "Inverting\n");
-    gsl_matrix* inv_lap = invert(lapacian);
-
-    gsl_vector *chips = gsl_vector_alloc(N * N);
-    gsl_vector *fires = gsl_vector_alloc(N * N);
-
-    for (int x = 0; x < N; x++) {
-        for (int y = 0; y < N; y++) {
-            int idx = y * N + x;
-            gsl_vector_set(chips, idx, (double) state[1+y][x]);
-        }
-    }
-
-    // Perform the matrix-vector product: fires = L^-1 * chips
-    // Parameters: CblasNoTrans (no transpose), 1.0 (alpha), A, x, 0.0 (beta), y
-    fprintf(stderr, "Matrix Vector product\n");
-    gsl_blas_dgemv(CblasNoTrans, 1.0, inv_lap, chips, 0.0, fires);
-
-    for (int x = 0; x < N; x++) {
-        for (int y = 0; y < N; y++) {
-            int idx = y * N + x;
-            output[1+y][x] = (long) round(gsl_vector_get(fires, idx));
-        }
-    }
-
-    gsl_vector_free(chips);
-    gsl_vector_free(fires);
-}
-
-int
-states_eq(int N,
-          unsigned char state[2+N][N],
-          unsigned char state_copy[2+N][N])
-{
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            if (state[1+y][x] != state_copy[1+y][x]) {
-                return 0;
-            }
-        }
-    }
-    return 1;
-}
-
-void
-states_copy(int N,
-            unsigned char state[2+N][N],
-            unsigned char state_copy[2+N][N])
-{
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            state_copy[1+y][x] = state[1+y][x];
-        }
-    }
-}
-
-void
-add_burning_config(int N,
-                   unsigned char state[2+N][N])
-{
-    for (int x = 0; x < N; x++) {
-        state[1][x] += 1;
-        state[N][x] += 1;
-    }
-    for (int y = 1; y < N-1; y++) {
-        state[1+y][0]   += 1;
-        state[1+y][N-1] += 1;
-    }
-    state[1][0]   += 1;
-    state[1][N-1] += 1;
-    state[N][0]   += 1;
-    state[N][N-1] += 1;
-}
-
-int
-is_identity(int N,
-            unsigned char state[2+N][N],
-            unsigned char state_copy[2+N][N],
-            unsigned char messages[N / TILE_WIDTH][2][N])
-{
-    states_copy(N, state, state_copy);
-    add_burning_config(N, state);
-    stabilize(N, state, messages);
-    return states_eq(N, state, state_copy);
-}
-
-void
-subtraction_algo(int N,
-                 unsigned char state[2+N][N],
-                 unsigned char messages[N / TILE_WIDTH][2][N])
-{
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            state[1+y][x] = 6;
-        }
-    }
-    stabilize(N, state, messages);
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            state[1+y][x] = 6 - state[1+y][x];
-        }
-    }
-    stabilize(N, state, messages);
-}
-
-void
-exp_burning_algo(int N,
-                 unsigned char state[2+N][N],
-                 unsigned char state_copy[2+N][N],
-                 unsigned char messages[N / TILE_WIDTH][2][N])
-{
-    // init with the burning config
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            state[1+y][x] = 0;
-        }
-    }
-    zero_messages(N, messages);
-    add_burning_config(N, state);
-
+    long tileSpills = 0;
+    long threadSpills = 0;
+    long spills = 0;
+    long totalSpills = 0;
     do {
-        for (int y = 0; y < N; y++) {
-            for (int x = 0; x < N; x++) {
-                state[1+y][x] *= 2;
+        spills = 0;
+
+        #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
+        for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
+
+            threadSpills = 0;
+
+            // import from messages
+            for (int y = 0; y < N; y++) {
+                int tmp = 0;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[xx][LEFT][y];
+                    messages[xx][LEFT][y] = 0;
+                }
+                state[1+y][xx * TILE_WIDTH] += tmp;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[xx][RIGHT][y];
+                    messages[xx][RIGHT][y] = 0;
+                }
+                state[1+y][(xx + 1) * TILE_WIDTH - 1] += tmp;
+            }
+
+            for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
+                do {
+                    tileSpills = 0;
+                    __m256i vspills = _mm256_set1_epi8(0);
+                    int ystart = (yy * TILE_HEIGHT) / 2;
+                    int yend = ystart + TILE_HEIGHT;
+                    for (int y = ystart; y < yend; y++) {
+                        int xspills = 0;
+                        int xstart = (xx * TILE_WIDTH);
+                        int xend = xstart + TILE_WIDTH;
+
+                        for (int x = xstart; x < xend; x += 8) {
+                            __m256i vv = _mm256_load_si256((void *)&state[1+y][x]);
+                            __m256i vvabove = _mm256_load_si256((void *)&state[y][x]);
+                            __m256i vvbelow = _mm256_load_si256((void *)&state[2+y][x]);
+                            __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
+                            vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
+
+                            vspills = _mm256_add_epi8(vinc, vspills);
+
+                            _mm256_store_si256((void *)&state[y][x], _mm256_add_epi8(vvabove, vinc));
+                            _mm256_store_si256((void *)&state[2+y][x], _mm256_add_epi8(vvbelow, vinc));
+
+                            __m256i vinc_left = m256_srl32_1(vinc);
+                            __m256i vinc_right = m256_sll32_1(vinc);
+
+                            __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
+                            __m256i vv_new = _mm256_add_epi8(vinc_left,
+                                    _mm256_add_epi8(vinc_right,
+                                    _mm256_sub_epi8(vv, vinc4)));
+                            _mm256_store_si256((void *)&state[1+y][x], vv_new);
+
+                            // tails
+                            if (x > xstart) {
+                                int left_spill = _mm256_extract_epi32(vinc, 0);
+                                state[1+y][x - 1] += left_spill;
+                            } else if (xx > 0) {
+                                int left_spill = _mm256_extract_epi32(vinc, 0);
+
+                                #pragma omp atomic update
+                                messages[xx - 1][RIGHT][y] += left_spill;
+                            }
+                            if (x < xend - 8) {
+                                int right_spill = _mm256_extract_epi32(vinc, 7);
+                                state[1+y][x+8] += right_spill;
+                            } else if (xx < N / TILE_WIDTH - 1) {
+                                int right_spill = _mm256_extract_epi32(vinc, 7);
+
+                                #pragma omp atomic update
+                                messages[xx + 1][LEFT][y] += right_spill;
+                            }
+                        }
+                    }
+                    tileSpills = m256_hadd_all(vspills);
+                    threadSpills += tileSpills;
+                } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
+            }
+
+            #pragma omp atomic update
+            spills += threadSpills;
+        }
+
+        assert(spills >= 0);
+        totalSpills += spills;
+        // render();
+    } while (spills > 0);
+
+    for (int xx = 1; xx < N / TILE_WIDTH - 1; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < N; i++) {
+                assert(messages[xx][dir][i] == 0);
             }
         }
-        stabilize(N, state, messages);
-        // render();
-    } while (!is_identity(N, state, state_copy, messages));
+    }
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            assert(state[1+y][x] < 4);
+            assert(state[1+y][x] >= 0);
+        }
+    }
+
+    // 8915347868
+    // 3251067552
+    fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
 }
+
+#define stabilize(dummy, N, state, messages) _Generic((dummy), \
+        unsigned char: stabilize_small, \
+        int: stabilize_big)(N, state, messages)
+
+
+#define states_eq_type(t) \
+int \
+states_eq(int N, \
+          t state[2+N][N], \
+          t state_copy[2+N][N]) \
+{ \
+    for (int y = 0; y < N; y++) { \
+        for (int x = 0; x < N; x++) { \
+            if (state[1+y][x] != state_copy[1+y][x]) { \
+                return 0; \
+            } \
+        } \
+    } \
+    return 1; \
+}
+
+#define states_copy_type(t) \
+void \
+states_copy(int N, \
+            t state[2+N][N], \
+            t state_copy[2+N][N]) \
+{ \
+    for (int y = 0; y < N; y++) { \
+        for (int x = 0; x < N; x++) { \
+            state_copy[1+y][x] = state[1+y][x]; \
+        } \
+    } \
+}
+
+#define add_burning_config_type(t) \
+void \
+add_burning_config(int N, \
+                   t state[2+N][N]) \
+{ \
+    for (int x = 0; x < N; x++) { \
+        state[1][x] += 1; \
+        state[N][x] += 1; \
+    } \
+    for (int y = 1; y < N-1; y++) { \
+        state[1+y][0]   += 1; \
+        state[1+y][N-1] += 1; \
+    } \
+    state[1][0]   += 1; \
+    state[1][N-1] += 1; \
+    state[N][0]   += 1; \
+    state[N][N-1] += 1; \
+}
+
+#define is_identity_type(t) \
+int \
+is_identity(int N, \
+            t state[2+N][N], \
+            t state_copy[2+N][N], \
+            t messages[N / TILE_WIDTH][2][N]) \
+{ \
+    states_copy(N, state, state_copy); \
+    add_burning_config(N, state); \
+    t dummy; \
+    stabilize(dummy, N, state, messages); \
+    return states_eq(N, state, state_copy); \
+}
+
+#define subtraction_algo_type(t) \
+void \
+subtraction_algo(int N, \
+                 t state[2+N][N], \
+                 t messages[N / TILE_WIDTH][2][N]) \
+{ \
+    for (int y = 0; y < N; y++) { \
+        for (int x = 0; x < N; x++) { \
+            state[1+y][x] = 6; \
+        } \
+    } \
+    t dummy; \
+    stabilize(dummy, N, state, messages); \
+    for (int y = 0; y < N; y++) { \
+        for (int x = 0; x < N; x++) { \
+            state[1+y][x] = 6 - state[1+y][x]; \
+        } \
+    } \
+    stabilize(dummy, N, state, messages); \
+}
+
+#define exp_burning_algo_type(t) \
+void \
+exp_burning_algo(int N, \
+                 t state[2+N][N], \
+                 t state_copy[2+N][N], \
+                 t messages[N / TILE_WIDTH][2][N]) \
+{ \
+    for (int y = 0; y < N; y++) { \
+        for (int x = 0; x < N; x++) { \
+            state[1+y][x] = 0; \
+        } \
+    } \
+    zero_messages(N, messages); \
+    add_burning_config(N, state); \
+    t dummy; \
+    do { \
+        for (int y = 0; y < N; y++) { \
+            for (int x = 0; x < N; x++) { \
+                state[1+y][x] *= 2; \
+            } \
+        } \
+        stabilize(dummy, N, state, messages); \
+    } while (!is_identity(N, state, state_copy, messages)); \
+}
+
+#define settype(t) \
+    zero_messages_type(t) \
+    states_copy_type(t) \
+    add_burning_config_type(t) \
+    states_eq_type(t) \
+    is_identity_type(t) \
+    exp_burning_algo_type(t) \
+    subtraction_algo_type(t)
+
+settype(int)
 
 int
 main(void)
 {
     setlocale(LC_ALL, "");
-    omp_set_num_threads(1);
+    omp_set_num_threads(8);
 
-    int N1 = 64;
-    __attribute__((aligned(64))) unsigned char state[2+N1][N1];
-    __attribute__((aligned(64))) unsigned char state_copy[2+N1][N1];
-    __attribute__((aligned(64))) unsigned char messages[N1 / TILE_WIDTH][2][N1];
-    __attribute__((aligned(64))) long odo[2+N1][N1];
+    int N1 = 512;
+    __attribute__((aligned(64))) int state[2+N1][N1];
+    __attribute__((aligned(64))) int state_copy[2+N1][N1];
+    __attribute__((aligned(64))) int messages[N1 / TILE_WIDTH][2][N1];
 
-    exp_burning_algo(N1, state, state_copy, messages);
-    odometer(N1, state, odo);
-
-    renderl(N1, odo);
+    subtraction_algo(N1, state, messages);
+    render(N1, state);
 }
