@@ -148,32 +148,34 @@ render_colour(int N,
     fwrite(buf, sizeof(buf), 1, stdout);
 }
 
-#define render(N, grid)  unsigned char buf[3L*N*SCALE*N*SCALE]; \
-                          double min = LONG_MAX; \
-                          double max = LONG_MIN; \
-                          for (int y = 0; y < N; y++) { \
-                              for (int x = 0; x < N; x++) { \
-                                  long v = grid[1+y][x]; \
-                                  if (v < min) { \
-                                      min = v; \
-                                  } \
-                                  if (v > max) { \
-                                      max = v; \
-                                  } \
-                              } \
-                          } \
-                          for (int y = 0; y < N*SCALE; y++) { \
-                              for (int x = 0; x < N*SCALE; x++) { \
-                                  long v = grid[1+y/SCALE][x/SCALE]; \
-                                  int idx = (int) (floor(254.0 * (v - min) / (max - min))); \
-                                  long c = inferno[idx]; \
-                                  buf[y*3L*SCALE*N + x*3L + 0] = c >> 16; \
-                                  buf[y*3L*SCALE*N + x*3L + 1] = c >>  8; \
-                                  buf[y*3L*SCALE*N + x*3L + 2] = c >>  0; \
-                              } \
-                          } \
-                          printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE); \
-                          fwrite(buf, sizeof(buf), 1, stdout);
+#define render(N, grid) unsigned char buf[3L*N*SCALE*N*SCALE]; \
+                        double min = LONG_MAX; \
+                        double max = LONG_MIN; \
+                        for (int y = 0; y < N; y++) { \
+                            for (int x = 0; x < N; x++) { \
+                                long v = grid[1+y][x]; \
+                                if (v < min) { \
+                                    min = v; \
+                                } \
+                                if (v > max) { \
+                                    max = v; \
+                                } \
+                            } \
+                        } \
+                        for (int y = 0; y < N*SCALE; y++) { \
+                            for (int x = 0; x < N*SCALE; x++) { \
+                                long v = grid[1+y/SCALE][x/SCALE]; \
+                                int idx = (int) (253.0 * (v - min) / (max - min)); \
+                                assert(idx >= 0); \
+                                assert(idx < 254); \
+                                long c = inferno[idx]; \
+                                buf[y*3L*SCALE*N + x*3L + 0] = c >> 16; \
+                                buf[y*3L*SCALE*N + x*3L + 1] = c >>  8; \
+                                buf[y*3L*SCALE*N + x*3L + 2] = c >>  0; \
+                            } \
+                        } \
+                        printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE); \
+                        fwrite(buf, sizeof(buf), 1, stdout);
 
 // Source - https://stackoverflow.com/a
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
@@ -619,6 +621,185 @@ exp_burning_algo(int N, \
     } while (!is_identity(N, state, state_copy, messages)); \
 }
 
+void
+handletopleft_corner(int N,
+              int x,
+              int y,
+              int small_state[2+N][N],
+              int big_state[2+2*N][2*N])
+{
+}
+
+void
+lattice_upscale(int N,
+                int small_state[2+N][N],
+                int big_state[2+2*N][2*N],
+                int messages[2*N / TILE_WIDTH][2][2*N])
+{
+    for (int radius = 0; radius < N - 1; radius++) {
+        int x;
+        int y;
+        int target;
+        int current;
+        int spills;
+        int top_spills;
+        int side_spills;
+
+        // Handle corners
+        // TOP-LEFT
+        x = N - radius - 1;
+        y = N - radius - 1;
+        target = small_state[1 + y/2][x/2];
+        current = big_state[1+y][x];
+        spills = target - current;
+        top_spills = spills / 2;
+        side_spills = spills - top_spills;
+
+        big_state[1 + y - 1][x]   -= 4*top_spills;
+        big_state[1 + y - 1][x-1] +=   top_spills;
+        big_state[1 + y - 1][x+1] +=   top_spills;
+        big_state[1 + y - 2][x]   +=   top_spills;
+        big_state[1 + y][x]       +=   top_spills;
+
+        big_state[1 + y][x-1]     -= 4*side_spills;
+        big_state[1 + y - 1][x-1] +=   side_spills;
+        big_state[1 + y + 1][x-1] +=   side_spills;
+        big_state[1 + y][x-2]     +=   side_spills;
+        big_state[1 + y][x]       +=   side_spills;
+
+        // TOP-RIGHT
+        x = N - radius - 1;
+        y = N + radius;
+        target = small_state[1 + y/2][x/2];
+        current = big_state[1+y][x];
+        spills = target - current;
+        top_spills = spills / 2;
+        side_spills = spills - top_spills;
+
+        big_state[1 + y - 1][x]   -= 4*top_spills;
+        big_state[1 + y - 1][x-1] +=   top_spills;
+        big_state[1 + y - 1][x+1] +=   top_spills;
+        big_state[1 + y - 2][x]   +=   top_spills;
+        big_state[1 + y][x]       +=   top_spills;
+
+        big_state[1 + y][x+1]     -= 4*side_spills;
+        big_state[1 + y - 1][x+1] +=   side_spills;
+        big_state[1 + y + 1][x+1] +=   side_spills;
+        big_state[1 + y][x+2]     +=   side_spills;
+        big_state[1 + y][x]       +=   side_spills;
+
+        // BOTTOM-LEFT
+        x = N - radius - 1;
+        y = N + radius;
+        target = small_state[1 + y/2][x/2];
+        current = big_state[1+y][x];
+        spills = target - current;
+        top_spills = spills / 2;
+        side_spills = spills - top_spills;
+
+        big_state[1 + y + 1][x]   -= 4*top_spills;
+        big_state[1 + y + 1][x-1] +=   top_spills;
+        big_state[1 + y + 1][x+1] +=   top_spills;
+        big_state[1 + y + 2][x]   +=   top_spills;
+        big_state[1 + y][x]       +=   top_spills;
+
+        big_state[1 + y][x-1]     -= 4*side_spills;
+        big_state[1 + y - 1][x-1] +=   side_spills;
+        big_state[1 + y + 1][x-1] +=   side_spills;
+        big_state[1 + y][x-2]     +=   side_spills;
+        big_state[1 + y][x]       +=   side_spills;
+
+        // BOTTOM-RIGHT
+        x = N + radius;
+        y = N + radius;
+        target = small_state[1 + y/2][x/2];
+        current = big_state[1+y][x];
+        spills = target - current;
+        top_spills = spills / 2;
+        side_spills = spills - top_spills;
+
+        big_state[1 + y + 1][x]   -= 4*top_spills;
+        big_state[1 + y + 1][x-1] +=   top_spills;
+        big_state[1 + y + 1][x+1] +=   top_spills;
+        big_state[1 + y + 2][x]   +=   top_spills;
+        big_state[1 + y][x]       +=   top_spills;
+
+        big_state[1 + y][x+1]     -= 4*side_spills;
+        big_state[1 + y - 1][x+1] +=   side_spills;
+        big_state[1 + y + 1][x+1] +=   side_spills;
+        big_state[1 + y][x+2]     +=   side_spills;
+        big_state[1 + y][x]       +=   side_spills;
+
+        // TOP
+        for (x = N - radius; x < N + radius; x++) {
+            y = N - radius - 1;
+            target = small_state[1 + y/2][x/2];
+            current = big_state[1+y][x];
+            spills = target - current;
+
+            big_state[1 + y - 1][x]   -= 4*spills;
+            big_state[1 + y - 1][x-1] +=   spills;
+            big_state[1 + y - 1][x+1] +=   spills;
+            big_state[1 + y - 2][x]   +=   spills;
+            big_state[1 + y][x]       +=   spills;
+        }
+
+        // BOTTOM
+        for (x = N - radius; x < N + radius; x++) {
+            y = N + radius;
+            target = small_state[1 + y/2][x/2];
+            current = big_state[1+y][x];
+            spills = target - current;
+
+            big_state[1 + y + 1][x]   -= 4*spills;
+            big_state[1 + y + 1][x-1] +=   spills;
+            big_state[1 + y + 1][x+1] +=   spills;
+            big_state[1 + y + 2][x]   +=   spills;
+            big_state[1 + y][x]       +=   spills;
+        }
+
+        // LEFT
+        for (y = N - radius; y < N + radius; y++) {
+            x = N - radius - 1;
+            target = small_state[1 + y/2][x/2];
+            current = big_state[1+y][x];
+            spills = target - current;
+
+            big_state[1 + y][x-1]     -= 4*side_spills;
+            big_state[1 + y - 1][x-1] +=   side_spills;
+            big_state[1 + y + 1][x-1] +=   side_spills;
+            big_state[1 + y][x-2]     +=   side_spills;
+            big_state[1 + y][x]       +=   side_spills;
+        }
+
+        // RIGHT
+        for (y = N - radius; y < N + radius; y++) {
+            x = N + radius;
+            target = small_state[1 + y/2][x/2];
+            current = big_state[1+y][x];
+            spills = target - current;
+
+            big_state[1 + y][x+1]     -= 4*spills;
+            big_state[1 + y - 1][x+1] +=   spills;
+            big_state[1 + y + 1][x+1] +=   spills;
+            big_state[1 + y][x+2]     +=   spills;
+            big_state[1 + y][x]       +=   spills;
+        }
+    }
+
+    // Sanit check, should sum to 0
+    long sum = 0;
+    for (int x = 0; x < 2*N; x++) {
+        for (int y = 0; y < 2*N; y++) {
+            sum += big_state[1+y][x];
+        }
+    }
+    fprintf(stderr, "Grid sum: %ld\n", sum);
+
+    // Add burning configs
+    return;
+}
+
 #define settype(t) \
     zero_messages_type(t) \
     states_copy_type(t) \
@@ -634,13 +815,17 @@ int
 main(void)
 {
     setlocale(LC_ALL, "");
-    omp_set_num_threads(8);
+    omp_set_num_threads(4);
 
-    int N1 = 512;
+    int N1 = 256;
+    int N2 = 512;
     __attribute__((aligned(64))) int state[2+N1][N1];
+    __attribute__((aligned(64))) int state_big[2+N2][N2];
     __attribute__((aligned(64))) int state_copy[2+N1][N1];
     __attribute__((aligned(64))) int messages[N1 / TILE_WIDTH][2][N1];
+    __attribute__((aligned(64))) int messages_big[N2 / TILE_WIDTH][2][N2];
 
-    subtraction_algo(N1, state, messages);
+    exp_burning_algo(N1, state, state_copy, messages);
+    lattice_upscale(N1, state, state_big, messages_big);
     render(N1, state);
 }
