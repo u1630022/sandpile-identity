@@ -153,7 +153,7 @@ render_colour(int N,
                         double max = LONG_MIN; \
                         for (int y = 0; y < N; y++) { \
                             for (int x = 0; x < N; x++) { \
-                                long v = grid[1+y][x]; \
+                                long v = (long) grid[1+y][x]; \
                                 if (v < min) { \
                                     min = v; \
                                 } \
@@ -164,7 +164,7 @@ render_colour(int N,
                         } \
                         for (int y = 0; y < N*SCALE; y++) { \
                             for (int x = 0; x < N*SCALE; x++) { \
-                                long v = grid[1+y/SCALE][x/SCALE]; \
+                                long v = (long) grid[1+y/SCALE][x/SCALE]; \
                                 int idx = (int) (253.0 * (v - min) / (max - min)); \
                                 assert(idx >= 0); \
                                 assert(idx < 254); \
@@ -176,6 +176,39 @@ render_colour(int N,
                         } \
                         printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE); \
                         fwrite(buf, sizeof(buf), 1, stdout);
+
+void
+render_d(int N, int M, double grid[N][M])
+{
+    unsigned char buf[3L*N*SCALE*N*SCALE];
+    double min = 10000000.0;
+    double max =-10000000.0;
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < M; x++) {
+            double v = grid[y][x];
+            if (v < min) {
+                min = v;
+            }
+            if (v > max) {
+                max = v;
+            }
+        }
+    }
+    for (int y = 0; y < N*SCALE; y++) {
+        for (int x = 0; x < M*SCALE; x++) {
+            double v = grid[y/SCALE][x/SCALE];
+            int idx = (int) (253.0 * (v - min) / (max - min));
+            assert(idx >= 0);
+            assert(idx < 254);
+            long c = inferno[idx];
+            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
+            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
+            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
+        }
+    }
+    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
+    fwrite(buf, sizeof(buf), 1, stdout);
+}
 
 // Source - https://stackoverflow.com/a
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
@@ -621,6 +654,224 @@ exp_burning_algo(int N, \
     } while (!is_identity(N, state, state_copy, messages)); \
 }
 
+// TODO:
+// We want to approximate the odometer of the identity sandpile
+// We do this by considering the equations Au = f (A: reduced laplacian, u: odometer, f: sandpile)
+// We do this by upscaling a smaller identity by 2 and setting this as f and solving for u.
+// u is cast to an integer array by rounding and true sandpile f is computed via laplacian.
+// stabilize true sandpile f and fire the burning config until convergence.
+//
+// Functions needed:
+// 1. Direct solver for small identity sandpiles (check)
+// 2. Identity upscaler (Need to consider case of non-power of 2 upscale)
+// 3. Rounding and converging of f.
+// 4. FMG odometer calculator
+// 4.1. Reduction operator
+// 4.2. Interpolation operator
+// 4.3. Relaxation operator (jacobi or gauss-seidel)
+// 4.4. Recursive FMG scheme
+
+// d2u/dx2 + d2u/dy2 = f
+// d/dx [[u(x+h) - u(x)] / h] + d/dx [[u(y+h) - u(y)] / h] = f
+// [d/dx u(x+h) - d/dx u(x)] / h + [d/dx u(y+h) - d/dx u(y)] / h = f
+// [[u(x+2h) - u(x+h)] / h - [u(x+h) - u(x)] / h] / h + [[u(y+2h) - u(y+h)] / h - [u(y+h) - u(y)] / h] / h = f
+// [u(x+2h) - 2*u(x+h) + u(x)] / h2 + [u(y+2h) - 2*u(y+h) + u(y)] / h2 = f
+// [u_1,y - 2*u_0,y + u_-1,y + u_x,1 - 2*u_x,0 + u_x,-1] / h2 = f
+// [u_x+1,y + u_x-1,y + u_x,y+1 + u_x,y-1 - 4*u_x,y] / h2 = f
+// - 4*u_x,y = h2 * f - u_x+1,y - u_x-1,y - u_x,y+1 - u_x,y-1
+// u_x,y = 0.25 * (u_x+1,y + u_x-1,y + u_x,y+1 + u_x,y-1 - h2 * f)
+void
+gauss_seidel(int n, int m, double u[n][m], double f[n][m], int iter)
+{
+    double h2 = 1.0 / ((n-1)*(m-1));
+    for (int it = 0; it < iter; it++) {
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 1; j < m-1; j++) {
+                u[i][j] = 0.25 * (  u[i-1][j]
+                                  + u[i+1][j]
+                                  + u[i][j-1]
+                                  + u[i][j+1]
+                                  - h2 * f[i][j]);
+            }
+        }
+        // Reverse direction
+        for (int i = n - 2; i >= 1; i--) {
+            for (int j = m - 2; j >= 1; j--) {
+                u[i][j] = 0.25 * (  u[i-1][j]
+                                  + u[i+1][j]
+                                  + u[i][j-1]
+                                  + u[i][j+1]
+                                  - h2 * f[i][j]);
+            }
+        }
+    }
+}
+
+// Full-weighting
+void
+inject(int n_fine,
+       int m_fine,
+       double fine[n_fine][m_fine],
+       double coarse[n_fine / 2 + 1][m_fine / 2 + 1])
+{
+    int n_coarse = n_fine / 2 + 1;
+    int m_coarse = m_fine / 2 + 1;
+    for (int i = 1; i < n_coarse-1; i++) {
+        for (int j = 1; j < m_coarse-1; j++) {
+            coarse[i][j] =   0.25 * fine[2*i-1][2*j-1]
+                           + 0.125 * (  fine[2*i-1][2*j] + fine[2*i-1][2*j+1]
+                                      + fine[2*i][2*j-1] + fine[2*i+1][2*j-1])
+                           + 0.0625 * (  fine[2*i][2*j]   + fine[2*i][2*j+1]
+                                       + fine[2*i+1][2*j] + fine[2*i+1][2*j+1]);
+        }
+    }
+}
+
+// TODO: need to account for non power of two grids
+void
+interpolate(int n_coarse,
+            int m_coarse,
+            int n_fine,
+            int m_fine,
+            double coarse[n_coarse][m_coarse],
+            double fine[n_fine][m_fine])
+{
+    for (int i = 1; i < n_coarse; i++) {
+        for (int j = 1; j < m_coarse; j++) {
+            fine[2*i][2*j]     = coarse[i][j];
+            fine[2*i-1][2*j]   = 0.5 * (coarse[i][j] + coarse[i-1][j]);
+            fine[2*i][2*j-1]   = 0.5 * (coarse[i][j] + coarse[i][j-1]);
+            fine[2*i-1][2*j-1] = 0.25 * (  coarse[i][j] + coarse[i][j-1]
+                                         + coarse[i-1][j] + coarse[i-1][j-1]);
+        }
+    }
+}
+
+void
+residual(int n,
+         int m,
+         double u[n][m],
+         double f[n][m],
+         double res[n][m])
+{
+    double h2 = 1.0 / ((n-1)*(m-1));
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            res[i][j] = - f[i][j] + (    u[i-1][j]
+                                     +   u[i+1][j]
+                                     +   u[i][j-1]
+                                     +   u[i][j+1]
+                                     - 4*u[i][j]  ) / h2;
+        }
+    }
+}
+
+double
+max_norm(int n,
+         int m,
+         double arr[n][m])
+{
+    double max_norm = arr[0][0];
+    double r;
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            r = arr[i][j];
+            if (max_norm < sqrt(r*r)) {
+                max_norm = sqrt(r*r);
+            }
+        }
+    }
+    return max_norm;
+}
+
+double
+dl2_norm(int n,
+         int m,
+         double arr[n][m])
+{
+    double norm = 0;
+    double h2 = 1.0 / ((n-1)*(m-1));
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            norm += arr[i][j] * arr[i][j];
+        }
+    }
+    norm *= h2;
+    norm = sqrt(norm);
+    return norm;
+}
+
+void
+vcycle(int n,
+       int m,
+       double u[n][m],
+       double f[n][m],
+       int depth)
+{
+    double res[n][m];
+    double u_correction[n][m];
+    double coarse_u[n/2 + 1][m/2 + 1];
+    double coarse_f[n/2 + 1][m/2 + 1];
+
+    if (n <= 3 || m <= 3) {
+        assert(n == 3);
+        assert(m == 3);
+
+        // TODO: h2 needs to be 1 on largest grid
+        double h2 = 1.0 / ((n-1)*(m-1));
+        u[1][1] = - 0.25 * f[1][1] * h2;
+        residual(n, m, u, f, res);
+        return;
+    }
+
+
+    gauss_seidel(n, m, u, f, 1);
+    residual(n, m, u, f, res);
+
+    inject(n, m, res, coarse_f);
+    for (int i = 0; i < n/2+1; i++) {
+        for (int j = 0; j < m/2+1; j++) {
+            coarse_u[i][j] = 0.0;
+        }
+    }
+
+    vcycle(n/2+1, m/2+1, coarse_u, coarse_f, depth+1);
+
+    interpolate(n/2+1, m/2+1, n, m, coarse_u, u_correction);
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            u[i][j] -= u_correction[i][j];
+        }
+    }
+
+    gauss_seidel(n, m, u, f, 1);
+}
+
+void
+fmg(int n,
+    int m,
+    double u[n][m],
+    double f[n][m],
+    int depth)
+{
+    if (n <= 3 || m <= 3) {
+        assert(n == 3);
+        assert(m == 3);
+
+        vcycle(n, m, u, f, 0);
+        return;
+    }
+
+    double coarse_u[n/2 + 1][m/2 + 1];
+    double coarse_f[n/2 + 1][m/2 + 1];
+
+    inject(n, m, f, coarse_f);
+    fmg(n/2+1, m/2+1, coarse_u, coarse_f, depth+1);
+    interpolate(n/2+1, m/2+1, n, m, coarse_u, u);
+
+    vcycle(n, m, u, f, 0);
+}
+
 
 #define settype(t) \
     zero_messages_type(t) \
@@ -637,14 +888,33 @@ settype(unsigned char)
 int
 main(void)
 {
-    setlocale(LC_ALL, "");
-    omp_set_num_threads(4);
+    // setlocale(LC_ALL, "");
+    // omp_set_num_threads(4);
 
-    int N = 256;
-    __attribute__((aligned(64))) unsigned char state[2+N][N];
-    __attribute__((aligned(64))) unsigned char state_copy[2+N][N];
-    __attribute__((aligned(64))) unsigned char messages[N / TILE_WIDTH][2][N];
+    // int N = 256;
+    // __attribute__((aligned(64))) unsigned char state[2+N][N];
+    // __attribute__((aligned(64))) unsigned char state_copy[2+N][N];
+    // __attribute__((aligned(64))) unsigned char messages[N / TILE_WIDTH][2][N];
 
-    exp_burning_algo(N, state, state_copy, messages);
-    render(N, state);
+    // exp_burning_algo(N, state, state_copy, messages);
+    // render(N, state);
+
+    int n = 257, m = 257;
+    double u[n][m];
+    double f[n][m];
+    double res[n][m];
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            f[i][j] = 1.0;
+            u[i][j] = 0.0;
+        }
+    }
+
+    fmg(n, m, u, f, 0);
+    residual(n, m, u, f, res);
+    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
+            dl2_norm(n, m, res), max_norm(n, m, res));
+
+    render_d(n, m, u);
 }
