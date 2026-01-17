@@ -23,7 +23,7 @@
 #include <omp.h>
 
 #ifndef SCALE
-#  define SCALE 1
+#  define SCALE 4
 #endif
 
 #define TILE_WIDTH 64
@@ -210,6 +210,39 @@ render_d(int N, int M, double grid[N][M])
     fwrite(buf, sizeof(buf), 1, stdout);
 }
 
+void
+render_i(int N, int grid[N][N])
+{
+    unsigned char buf[3L*(N-2)*SCALE*(N-2)*SCALE];
+    double min = LONG_MAX;
+    double max = LONG_MIN;
+    for (int y = 1; y < N-1; y++) {
+        for (int x = 1; x < N-1; x++) {
+            double v = grid[y][x];
+            if (v < min) {
+                min = v;
+            }
+            if (v > max) {
+                max = v;
+            }
+        }
+    }
+    for (int y = 0; y < (N-2)*SCALE; y++) {
+        for (int x = 0; x < (N-2)*SCALE; x++) {
+            int v = grid[1+y/SCALE][1+x/SCALE];
+            int idx = (int) (253.0 * (v - min) / (max - min));
+            assert(idx >= 0);
+            assert(idx < 254);
+            long c = inferno[idx];
+            buf[y*3L*SCALE*(N-2) + x*3L + 0] = c >> 16;
+            buf[y*3L*SCALE*(N-2) + x*3L + 1] = c >>  8;
+            buf[y*3L*SCALE*(N-2) + x*3L + 2] = c >>  0;
+        }
+    }
+    printf("P6\n%d %d\n255\n", (N-2)*SCALE, (N-2)*SCALE);
+    fwrite(buf, sizeof(buf), 1, stdout);
+}
+
 // Source - https://stackoverflow.com/a
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
 // Retrieved 2025-12-11, License - CC BY-SA 3.0
@@ -295,6 +328,34 @@ m256_hadd_all(__m256i i) {
         sum += sum_buffer[i];
     }
     return sum;
+}
+
+// Assume surrounded by buffer
+void
+stabilize_generic(int N,
+                  int M,
+                  int state[N][M])
+{
+    long spills = 0;
+    long totalSpills = 0;
+    do {
+        spills = 0;
+        for (int y = 1; y < N - 1; y++) {
+            for (int x = 1; x < M - 1; x++) {
+                if (state[y][x] >= 4) {
+                    state[y][x] -= 4;
+                    state[y+1][x] += 1;
+                    state[y-1][x] += 1;
+                    state[y][x+1] += 1;
+                    state[y][x-1] += 1;
+                    spills++;
+                }
+            }
+        }
+        totalSpills += spills;
+        // render_i(N, state);
+    } while (spills > 0);
+    // fprintf(stderr, "Total Spills: %ld", totalSpills);
 }
 
 static void
@@ -680,10 +741,14 @@ exp_burning_algo(int N, \
 // [u_x+1,y + u_x-1,y + u_x,y+1 + u_x,y-1 - 4*u_x,y] / h2 = f
 // - 4*u_x,y = h2 * f - u_x+1,y - u_x-1,y - u_x,y+1 - u_x,y-1
 // u_x,y = 0.25 * (u_x+1,y + u_x-1,y + u_x,y+1 + u_x,y-1 - h2 * f)
+
+int FULL_N;
+int FULL_M;
+
 void
 gauss_seidel(int n, int m, double u[n][m], double f[n][m], int iter)
 {
-    double h2 = 1.0 / ((n-1)*(m-1));
+    double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
     for (int it = 0; it < iter; it++) {
         for (int i = 1; i < n-1; i++) {
             for (int j = 1; j < m-1; j++) {
@@ -736,16 +801,32 @@ interpolate(int n_coarse,
             double coarse[n_coarse][m_coarse],
             double fine[n_fine][m_fine])
 {
-    for (int i = 1; i < n_coarse; i++) {
-        for (int j = 1; j < m_coarse; j++) {
-            fine[2*i][2*j]     = coarse[i][j];
-            fine[2*i-1][2*j]   = 0.5 * (coarse[i][j] + coarse[i-1][j]);
-            fine[2*i][2*j-1]   = 0.5 * (coarse[i][j] + coarse[i][j-1]);
-            fine[2*i-1][2*j-1] = 0.25 * (  coarse[i][j] + coarse[i][j-1]
-                                         + coarse[i-1][j] + coarse[i-1][j-1]);
+    double scale_x = (double)(n_coarse - 1) / (n_fine - 1);
+    double scale_y = (double)(m_coarse - 1) / (m_fine - 1);
+
+    for (int i = 1; i < n_fine - 1; i++) {
+        for (int j = 1; j < m_fine - 1; j++) {
+            double x = i * scale_x;
+            double y = j * scale_y;
+
+            int x0 = (int)floor(x);
+            int y0 = (int)floor(y);
+            int x1 = x0 + 1;
+            int y1 = y0 + 1;
+
+            double dx = x - x0;
+            double dy = y - y0;
+
+            // Bilinear interpolation
+            fine[i][j] =
+                (1 - dx) * (1 - dy) * coarse[x0][y0] +
+                dx * (1 - dy) * coarse[x1][y0] +
+                (1 - dx) * dy * coarse[x0][y1] +
+                dx * dy * coarse[x1][y1];
         }
     }
 }
+
 
 void
 residual(int n,
@@ -754,7 +835,7 @@ residual(int n,
          double f[n][m],
          double res[n][m])
 {
-    double h2 = 1.0 / ((n-1)*(m-1));
+    double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
             res[i][j] = - f[i][j] + (    u[i-1][j]
@@ -790,7 +871,7 @@ dl2_norm(int n,
          double arr[n][m])
 {
     double norm = 0;
-    double h2 = 1.0 / ((n-1)*(m-1));
+    double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
             norm += arr[i][j] * arr[i][j];
@@ -817,15 +898,14 @@ vcycle(int n,
         assert(n == 3);
         assert(m == 3);
 
-        // TODO: h2 needs to be 1 on largest grid
-        double h2 = 1.0 / ((n-1)*(m-1));
+        double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
         u[1][1] = - 0.25 * f[1][1] * h2;
         residual(n, m, u, f, res);
         return;
     }
 
 
-    gauss_seidel(n, m, u, f, 1);
+    gauss_seidel(n, m, u, f, 2);
     residual(n, m, u, f, res);
 
     inject(n, m, res, coarse_f);
@@ -844,7 +924,7 @@ vcycle(int n,
         }
     }
 
-    gauss_seidel(n, m, u, f, 1);
+    gauss_seidel(n, m, u, f, 2);
 }
 
 void
@@ -864,6 +944,11 @@ fmg(int n,
 
     double coarse_u[n/2 + 1][m/2 + 1];
     double coarse_f[n/2 + 1][m/2 + 1];
+    for (int i = 0; i < n/2+1; i++) {
+        for (int j = 0; j < m/2+1; j++) {
+            coarse_u[i][j] = 0.0;
+        }
+    }
 
     inject(n, m, f, coarse_f);
     fmg(n/2+1, m/2+1, coarse_u, coarse_f, depth+1);
@@ -885,6 +970,12 @@ fmg(int n,
 // Either unsigned char or int
 settype(unsigned char)
 
+// TODO:
+// 1. Rework functions to take pointers instead of variable arrays so that we can calculate larger identities
+// 2. Implement odd even reduction and interpolation so that we can converge poisson solutions for all grid sizes.
+// 3. Tweak base solver so that we can solve rectangular grids
+// 4. Test recursive sandpile-poisson method
+// 5. Benchmark methods
 int
 main(void)
 {
@@ -900,13 +991,15 @@ main(void)
     // render(N, state);
 
     int n = 257, m = 257;
+    FULL_N = n;
+    FULL_M = m;
     double u[n][m];
     double f[n][m];
     double res[n][m];
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
-            f[i][j] = 1.0;
+            f[i][j] = 2.125;
             u[i][j] = 0.0;
         }
     }
@@ -916,5 +1009,55 @@ main(void)
     fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
             dl2_norm(n, m, res), max_norm(n, m, res));
 
-    render_d(n, m, u);
+    int s_buf[n][m];
+    int s_copy[n][m];
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            s_buf[i][j] =  (int) floor(u[i-1][j])
+                      +    (int) floor(u[i+1][j])
+                      +    (int) floor(u[i][j-1])
+                      +    (int) floor(u[i][j+1])
+                      - 4* (int) floor(u[i][j]);
+        }
+    }
+
+    stabilize_generic(n, m, s_buf);
+
+    int converged = 0;
+    int burns = 0;
+    do {
+        // copy into s_copy
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 1; j < m-1; j++) {
+                s_copy[i][j] = s_buf[i][j];
+            }
+        }
+
+        // Add burning config
+        for (int x = 1; x < n-1; x++) {
+            s_buf[1][x] += 1;
+            s_buf[n-2][x] += 1;
+        }
+        for (int y = 1; y < n-1; y++) {
+            s_buf[y][1]   += 1;
+            s_buf[y][n-2] += 1;
+        }
+
+        stabilize_generic(n, m, s_buf);
+        render_i(n, s_buf);
+        burns++;
+
+        // Check convergance
+        converged = 1;
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 1; j < m-1; j++) {
+                if (s_copy[i][j] != s_buf[i][j]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    fprintf(stderr, "Count burns: %d\n", burns);
+    render_i(n, s_buf);
 }
