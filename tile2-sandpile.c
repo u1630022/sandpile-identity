@@ -211,6 +211,39 @@ render_d(int N, int M, double grid[N][M])
 }
 
 void
+render_d_buf(int N, int M, double grid[N][M])
+{
+    unsigned char buf[3L*(N-2)*SCALE*(N-2)*SCALE];
+    double min = 10000000.0;
+    double max =-10000000.0;
+    for (int y = 1; y < N-1; y++) {
+        for (int x = 1; x < N-1; x++) {
+            double v = grid[y][x];
+            if (v < min) {
+                min = v;
+            }
+            if (v > max) {
+                max = v;
+            }
+        }
+    }
+    for (int y = 0; y < (N-2)*SCALE; y++) {
+        for (int x = 0; x < (N-2)*SCALE; x++) {
+            double v = grid[1+y/SCALE][1+x/SCALE];
+            int idx = (int) (253.0 * (v - min) / (max - min));
+            assert(idx >= 0);
+            assert(idx < 254);
+            long c = inferno[idx];
+            buf[y*3L*SCALE*(N-2) + x*3L + 0] = c >> 16;
+            buf[y*3L*SCALE*(N-2) + x*3L + 1] = c >>  8;
+            buf[y*3L*SCALE*(N-2) + x*3L + 2] = c >>  0;
+        }
+    }
+    printf("P6\n%d %d\n255\n", (N-2)*SCALE, (N-2)*SCALE);
+    fwrite(buf, sizeof(buf), 1, stdout);
+}
+
+void
 render_i(int N, int grid[N][N])
 {
     unsigned char buf[3L*(N-2)*SCALE*(N-2)*SCALE];
@@ -355,7 +388,7 @@ stabilize_generic(int N,
         totalSpills += spills;
         // render_i(N, state);
     } while (spills > 0);
-    // fprintf(stderr, "Total Spills: %ld", totalSpills);
+    fprintf(stderr, "Total Spills: %ld\n", totalSpills);
 }
 
 static void
@@ -990,7 +1023,7 @@ main(void)
     // exp_burning_algo(N, state, state_copy, messages);
     // render(N, state);
 
-    int n = 257, m = 257;
+    int n = 129, m = 129;
     FULL_N = n;
     FULL_M = m;
     double u[n][m];
@@ -999,7 +1032,7 @@ main(void)
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
-            f[i][j] = 2.125;
+            f[i][j] = 2.35;
             u[i][j] = 0.0;
         }
     }
@@ -1035,16 +1068,16 @@ main(void)
 
         // Add burning config
         for (int x = 1; x < n-1; x++) {
-            s_buf[1][x] += 1;
-            s_buf[n-2][x] += 1;
+            s_buf[1][x] += 4;
+            s_buf[n-2][x] += 4;
         }
         for (int y = 1; y < n-1; y++) {
-            s_buf[y][1]   += 1;
-            s_buf[y][n-2] += 1;
+            s_buf[y][1]   += 4;
+            s_buf[y][n-2] += 4;
         }
 
         stabilize_generic(n, m, s_buf);
-        render_i(n, s_buf);
+        // render_i(n, s_buf);
         burns++;
 
         // Check convergance
@@ -1059,5 +1092,93 @@ main(void)
     } while (!converged);
 
     fprintf(stderr, "Count burns: %d\n", burns);
-    render_i(n, s_buf);
+
+    // Scale up and set as rhs
+    int n2 = 257;
+    int m2 = 257;
+
+    FULL_N = n2;
+    FULL_M = m2;
+    double u2[n2][m2];
+    double f2[n2][m2];
+    double s_bufd[n][m];
+    double res2[n2][m2];
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            s_bufd[i][j] = 0;
+        }
+    }
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            s_bufd[i][j] = (double) s_buf[i][j];
+        }
+    }
+    interpolate(n, m, n2, m2, s_bufd, f2);
+
+    for (int i = 0; i < n2; i++) {
+        for (int j = 0; j < m2; j++) {
+            u2[i][j] = 0;
+            f2[i][j] *= 1.01;
+        }
+    }
+
+    fmg(n2, m2, u2, f2, 0);
+    residual(n2, m2, u2, f2, res2);
+    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
+            dl2_norm(n2, m2, res2), max_norm(n2, m2, res2));
+
+    // Stabilize double
+    int s_buf2[n2][m2];
+    int s_copy2[n2][m2];
+    for (int i = 1; i < n2-1; i++) {
+        for (int j = 1; j < m2-1; j++) {
+            s_buf2[i][j] = (int) floor(u2[i-1][j])
+                      +    (int) floor(u2[i+1][j])
+                      +    (int) floor(u2[i][j-1])
+                      +    (int) floor(u2[i][j+1])
+                      - 4* (int) floor(u2[i][j]);
+        }
+    }
+
+    stabilize_generic(n2, m2, s_buf2);
+
+    converged = 0;
+    burns = 0;
+    int step = 10;
+    do {
+        // copy into s_copy
+        for (int i = 1; i < n2-1; i++) {
+            for (int j = 1; j < m2-1; j++) {
+                s_copy2[i][j] = s_buf2[i][j];
+            }
+        }
+
+        // Add burning config
+        for (int x = 1; x < n2-1; x++) {
+            s_buf2[1][x] += step;
+            s_buf2[n2-2][x] += step;
+        }
+        for (int y = 1; y < n2-1; y++) {
+            s_buf2[y][1]   += step;
+            s_buf2[y][n2-2] += step;
+        }
+
+        stabilize_generic(n2, m2, s_buf2);
+        // render_i(n2, s_buf2);
+        burns++;
+
+        // Check convergance
+        converged = 1;
+        for (int i = 1; i < n2-1; i++) {
+            for (int j = 1; j < m2-1; j++) {
+                if (s_copy2[i][j] != s_buf2[i][j]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    fprintf(stderr, "Count burns: %d\n", burns);
+    render_i(n2, s_buf2);
 }
