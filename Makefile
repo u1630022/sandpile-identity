@@ -10,7 +10,7 @@ np: np-sandpile.c
 	gcc -O3 -march=native -fopenmp np-sandpile.c -o np
 
 tile2: tile2-sandpile.c
-	gcc -O1 -march=native -fopenmp tile2-sandpile.c -lm -o tile2
+	gcc -O3 -march=native -fopenmp tile2-sandpile.c -lm -o tile2
 
 debug: my-sandpile.c
 	gcc -g3 -march=native -fopenmp my-sandpile.c -o sand-debug

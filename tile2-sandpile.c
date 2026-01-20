@@ -23,7 +23,7 @@
 #include <omp.h>
 
 #ifndef SCALE
-#  define SCALE 4
+#  define SCALE 2
 #endif
 
 #define TILE_WIDTH 64
@@ -41,6 +41,7 @@
 #define CX 0x0000ff
 
 static const long ALIGNMENT = 64;
+int IDX(int i, int j, int n) { return i * n + j; }
 
 // Inferno palette
 static const long inferno[254] = {
@@ -244,14 +245,14 @@ render_d_buf(int N, int M, double grid[N][M])
 }
 
 void
-render_i(int N, int grid[N][N])
+render_i(int N, int* grid)
 {
     unsigned char buf[3L*(N-2)*SCALE*(N-2)*SCALE];
     double min = LONG_MAX;
     double max = LONG_MIN;
     for (int y = 1; y < N-1; y++) {
         for (int x = 1; x < N-1; x++) {
-            double v = grid[y][x];
+            double v = grid[IDX(y, x, N)];
             if (v < min) {
                 min = v;
             }
@@ -262,7 +263,7 @@ render_i(int N, int grid[N][N])
     }
     for (int y = 0; y < (N-2)*SCALE; y++) {
         for (int x = 0; x < (N-2)*SCALE; x++) {
-            int v = grid[1+y/SCALE][1+x/SCALE];
+            int v = grid[IDX(1+y/SCALE, 1+x/SCALE, N)];
             int idx = (int) (253.0 * (v - min) / (max - min));
             assert(idx >= 0);
             assert(idx < 254);
@@ -367,7 +368,7 @@ m256_hadd_all(__m256i i) {
 void
 stabilize_generic(int N,
                   int M,
-                  int state[N][M])
+                  int* state)
 {
     long spills = 0;
     long totalSpills = 0;
@@ -375,12 +376,12 @@ stabilize_generic(int N,
         spills = 0;
         for (int y = 1; y < N - 1; y++) {
             for (int x = 1; x < M - 1; x++) {
-                if (state[y][x] >= 4) {
-                    state[y][x] -= 4;
-                    state[y+1][x] += 1;
-                    state[y-1][x] += 1;
-                    state[y][x+1] += 1;
-                    state[y][x-1] += 1;
+                if (state[IDX(y, x, M)] >= 4) {
+                    state[IDX(y, x, M)] -= 4;
+                    state[IDX(y+1, x, M)] += 1;
+                    state[IDX(y-1, x, M)] += 1;
+                    state[IDX(y, x+1, M)] += 1;
+                    state[IDX(y, x-1, M)] += 1;
                     spills++;
                 }
             }
@@ -778,62 +779,49 @@ exp_burning_algo(int N, \
 int FULL_N;
 int FULL_M;
 
-void
-gauss_seidel(int n, int m, double u[n][m], double f[n][m], int iter)
-{
+
+void gauss_seidel(int n, int m, double *u, double *f, int iter) {
     double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
     for (int it = 0; it < iter; it++) {
         for (int i = 1; i < n-1; i++) {
             for (int j = 1; j < m-1; j++) {
-                u[i][j] = 0.25 * (  u[i-1][j]
-                                  + u[i+1][j]
-                                  + u[i][j-1]
-                                  + u[i][j+1]
-                                  - h2 * f[i][j]);
+                u[IDX(i, j, m)] = 0.25 * (
+                    u[IDX(i-1, j, m)] + u[IDX(i+1, j, m)] +
+                    u[IDX(i, j-1, m)] + u[IDX(i, j+1, m)] -
+                    h2 * f[IDX(i, j, m)]);
             }
         }
         // Reverse direction
         for (int i = n - 2; i >= 1; i--) {
             for (int j = m - 2; j >= 1; j--) {
-                u[i][j] = 0.25 * (  u[i-1][j]
-                                  + u[i+1][j]
-                                  + u[i][j-1]
-                                  + u[i][j+1]
-                                  - h2 * f[i][j]);
+                u[IDX(i, j, m)] = 0.25 * (
+                    u[IDX(i-1, j, m)] + u[IDX(i+1, j, m)] +
+                    u[IDX(i, j-1, m)] + u[IDX(i, j+1, m)] -
+                    h2 * f[IDX(i, j, m)]);
             }
         }
     }
 }
 
 // Full-weighting
-void
-inject(int n_fine,
-       int m_fine,
-       double fine[n_fine][m_fine],
-       double coarse[n_fine / 2 + 1][m_fine / 2 + 1])
-{
+void inject(int n_fine, int m_fine, double *fine, double *coarse) {
     int n_coarse = n_fine / 2 + 1;
     int m_coarse = m_fine / 2 + 1;
     for (int i = 1; i < n_coarse-1; i++) {
         for (int j = 1; j < m_coarse-1; j++) {
-            coarse[i][j] =   0.25 * fine[2*i-1][2*j-1]
-                           + 0.125 * (  fine[2*i-1][2*j] + fine[2*i-1][2*j+1]
-                                      + fine[2*i][2*j-1] + fine[2*i+1][2*j-1])
-                           + 0.0625 * (  fine[2*i][2*j]   + fine[2*i][2*j+1]
-                                       + fine[2*i+1][2*j] + fine[2*i+1][2*j+1]);
+            coarse[IDX(i, j, m_coarse)] =
+                0.25 * fine[IDX(2*i-1, 2*j-1, m_fine)] +
+                0.125 * (
+                    fine[IDX(2*i-1, 2*j, m_fine)] + fine[IDX(2*i-1, 2*j+1, m_fine)] +
+                    fine[IDX(2*i, 2*j-1, m_fine)] + fine[IDX(2*i+1, 2*j-1, m_fine)]) +
+                0.0625 * (
+                    fine[IDX(2*i, 2*j, m_fine)] + fine[IDX(2*i, 2*j+1, m_fine)] +
+                    fine[IDX(2*i+1, 2*j, m_fine)] + fine[IDX(2*i+1, 2*j+1, m_fine)]);
         }
     }
 }
 
-// TODO: need to account for non power of two grids
-void
-interpolate(int n_coarse,
-            int m_coarse,
-            int n_fine,
-            int m_fine,
-            double coarse[n_coarse][m_coarse],
-            double fine[n_fine][m_fine])
-{
+void interpolate(int n_coarse, int m_coarse, int n_fine, int m_fine, double *coarse, double *fine) {
     double scale_x = (double)(n_coarse - 1) / (n_fine - 1);
     double scale_y = (double)(m_coarse - 1) / (m_fine - 1);
 
@@ -851,45 +839,33 @@ interpolate(int n_coarse,
             double dy = y - y0;
 
             // Bilinear interpolation
-            fine[i][j] =
-                (1 - dx) * (1 - dy) * coarse[x0][y0] +
-                dx * (1 - dy) * coarse[x1][y0] +
-                (1 - dx) * dy * coarse[x0][y1] +
-                dx * dy * coarse[x1][y1];
+            fine[IDX(i, j, m_fine)] =
+                (1 - dx) * (1 - dy) * coarse[IDX(x0, y0, m_coarse)] +
+                dx * (1 - dy) * coarse[IDX(x1, y0, m_coarse)] +
+                (1 - dx) * dy * coarse[IDX(x0, y1, m_coarse)] +
+                dx * dy * coarse[IDX(x1, y1, m_coarse)];
         }
     }
 }
 
-
-void
-residual(int n,
-         int m,
-         double u[n][m],
-         double f[n][m],
-         double res[n][m])
-{
+void residual(int n, int m, double *u, double *f, double *res) {
     double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
-            res[i][j] = - f[i][j] + (    u[i-1][j]
-                                     +   u[i+1][j]
-                                     +   u[i][j-1]
-                                     +   u[i][j+1]
-                                     - 4*u[i][j]  ) / h2;
+            res[IDX(i, j, m)] = -f[IDX(i, j, m)] + (
+                u[IDX(i-1, j, m)] + u[IDX(i+1, j, m)] +
+                u[IDX(i, j-1, m)] + u[IDX(i, j+1, m)] -
+                4 * u[IDX(i, j, m)]) / h2;
         }
     }
 }
 
-double
-max_norm(int n,
-         int m,
-         double arr[n][m])
-{
-    double max_norm = arr[0][0];
+double max_norm(int n, int m, double *arr) {
+    double max_norm = arr[IDX(0, 0, m)];
     double r;
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
-            r = arr[i][j];
+            r = arr[IDX(i, j, m)];
             if (max_norm < sqrt(r*r)) {
                 max_norm = sqrt(r*r);
             }
@@ -898,16 +874,12 @@ max_norm(int n,
     return max_norm;
 }
 
-double
-dl2_norm(int n,
-         int m,
-         double arr[n][m])
-{
+double dl2_norm(int n, int m, double *arr) {
     double norm = 0;
     double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
-            norm += arr[i][j] * arr[i][j];
+            norm += arr[IDX(i, j, m)] * arr[IDX(i, j, m)];
         }
     }
     norm *= h2;
@@ -915,79 +887,77 @@ dl2_norm(int n,
     return norm;
 }
 
-void
-vcycle(int n,
-       int m,
-       double u[n][m],
-       double f[n][m],
-       int depth)
-{
-    double res[n][m];
-    double u_correction[n][m];
-    double coarse_u[n/2 + 1][m/2 + 1];
-    double coarse_f[n/2 + 1][m/2 + 1];
+void vcycle(int n, int m, double *u, double *f, int depth) {
 
     if (n <= 3 || m <= 3) {
         assert(n == 3);
         assert(m == 3);
-
         double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
-        u[1][1] = - 0.25 * f[1][1] * h2;
-        residual(n, m, u, f, res);
+        u[IDX(1, 1, m)] = -0.25 * f[IDX(1, 1, m)] * h2;
         return;
     }
 
+    double *res = malloc(n * m * sizeof(double));
+    double *u_correction = malloc(n * m * sizeof(double));
+    int n_coarse = n/2 + 1;
+    int m_coarse = m/2 + 1;
+    double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
+    double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
 
     gauss_seidel(n, m, u, f, 2);
     residual(n, m, u, f, res);
 
     inject(n, m, res, coarse_f);
-    for (int i = 0; i < n/2+1; i++) {
-        for (int j = 0; j < m/2+1; j++) {
-            coarse_u[i][j] = 0.0;
+    for (int i = 0; i < n_coarse; i++) {
+        for (int j = 0; j < m_coarse; j++) {
+            coarse_u[IDX(i, j, m_coarse)] = 0.0;
         }
     }
 
-    vcycle(n/2+1, m/2+1, coarse_u, coarse_f, depth+1);
+    vcycle(n_coarse, m_coarse, coarse_u, coarse_f, depth+1);
 
-    interpolate(n/2+1, m/2+1, n, m, coarse_u, u_correction);
+    interpolate(n_coarse, m_coarse, n, m, coarse_u, u_correction);
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
-            u[i][j] -= u_correction[i][j];
+            u[IDX(i, j, m)] -= u_correction[IDX(i, j, m)];
         }
     }
 
     gauss_seidel(n, m, u, f, 2);
+
+    free(res);
+    free(u_correction);
+    free(coarse_u);
+    free(coarse_f);
 }
 
-void
-fmg(int n,
-    int m,
-    double u[n][m],
-    double f[n][m],
-    int depth)
-{
+void fmg(int n, int m, double *u, double *f, int depth) {
     if (n <= 3 || m <= 3) {
         assert(n == 3);
         assert(m == 3);
-
         vcycle(n, m, u, f, 0);
         return;
     }
 
-    double coarse_u[n/2 + 1][m/2 + 1];
-    double coarse_f[n/2 + 1][m/2 + 1];
-    for (int i = 0; i < n/2+1; i++) {
-        for (int j = 0; j < m/2+1; j++) {
-            coarse_u[i][j] = 0.0;
+    int n_coarse = n/2 + 1;
+    int m_coarse = m/2 + 1;
+    double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
+    double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
+
+    for (int i = 0; i < n_coarse; i++) {
+        for (int j = 0; j < m_coarse; j++) {
+            coarse_u[IDX(i, j, m_coarse)] = 0.0;
         }
     }
 
     inject(n, m, f, coarse_f);
-    fmg(n/2+1, m/2+1, coarse_u, coarse_f, depth+1);
-    interpolate(n/2+1, m/2+1, n, m, coarse_u, u);
+    fmg(n_coarse, m_coarse, coarse_u, coarse_f, depth+1);
+    interpolate(n_coarse, m_coarse, n, m, coarse_u, u);
 
     vcycle(n, m, u, f, 0);
+
+    free(coarse_u);
+    free(coarse_f);
 }
 
 
@@ -1012,7 +982,7 @@ settype(unsigned char)
 int
 main(void)
 {
-    // setlocale(LC_ALL, "");
+    setlocale(LC_ALL, "");
     // omp_set_num_threads(4);
 
     // int N = 256;
@@ -1026,14 +996,14 @@ main(void)
     int n = 129, m = 129;
     FULL_N = n;
     FULL_M = m;
-    double u[n][m];
-    double f[n][m];
-    double res[n][m];
+    double* u = malloc(sizeof(double) * n * m);
+    double* f = malloc(sizeof(double) * n * m);
+    double* res = malloc(sizeof(double) * n * m);
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
-            f[i][j] = 2.35;
-            u[i][j] = 0.0;
+            f[IDX(i, j, m)] = 2.35;
+            u[IDX(i, j, m)] = 0.0;
         }
     }
 
@@ -1042,15 +1012,15 @@ main(void)
     fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
             dl2_norm(n, m, res), max_norm(n, m, res));
 
-    int s_buf[n][m];
-    int s_copy[n][m];
+    int* s_buf = malloc(sizeof(int) * n * m);
+    int* s_copy = malloc(sizeof(int) * n * m);
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
-            s_buf[i][j] =  (int) floor(u[i-1][j])
-                      +    (int) floor(u[i+1][j])
-                      +    (int) floor(u[i][j-1])
-                      +    (int) floor(u[i][j+1])
-                      - 4* (int) floor(u[i][j]);
+            s_buf[IDX(i, j, m)] =  (int) floor(u[IDX(i-1, j, m)])
+                              +    (int) floor(u[IDX(i+1, j, m)])
+                              +    (int) floor(u[IDX(i, j-1, m)])
+                              +    (int) floor(u[IDX(i, j+1, m)])
+                              - 4* (int) floor(u[IDX(i, j, m)]);
         }
     }
 
@@ -1062,18 +1032,18 @@ main(void)
         // copy into s_copy
         for (int i = 1; i < n-1; i++) {
             for (int j = 1; j < m-1; j++) {
-                s_copy[i][j] = s_buf[i][j];
+                s_copy[IDX(i, j, m)] = s_buf[IDX(i, j, m)];
             }
         }
 
         // Add burning config
         for (int x = 1; x < n-1; x++) {
-            s_buf[1][x] += 4;
-            s_buf[n-2][x] += 4;
+            s_buf[IDX(1, x, m)] += 4;
+            s_buf[IDX(n-2, x, m)] += 4;
         }
         for (int y = 1; y < n-1; y++) {
-            s_buf[y][1]   += 4;
-            s_buf[y][n-2] += 4;
+            s_buf[IDX(y, 1, m)]   += 4;
+            s_buf[IDX(y, n-2, m)] += 4;
         }
 
         stabilize_generic(n, m, s_buf);
@@ -1084,7 +1054,7 @@ main(void)
         converged = 1;
         for (int i = 1; i < n-1; i++) {
             for (int j = 1; j < m-1; j++) {
-                if (s_copy[i][j] != s_buf[i][j]) {
+                if (s_copy[IDX(i, j, m)] != s_buf[IDX(i, j, m)]) {
                     converged = 0;
                 }
             }
@@ -1099,27 +1069,27 @@ main(void)
 
     FULL_N = n2;
     FULL_M = m2;
-    double u2[n2][m2];
-    double f2[n2][m2];
-    double s_bufd[n][m];
-    double res2[n2][m2];
+    double* u2 = malloc(sizeof(double) * n2 * m2);
+    double* f2 = malloc(sizeof(double) * n2 * m2);
+    double* s_bufd = malloc(sizeof(double) * n * m);
+    double* res2 = malloc(sizeof(double) * n2 * m2);
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
-            s_bufd[i][j] = 0;
+            s_bufd[IDX(i, j, m)] = 0;
         }
     }
     for (int i = 1; i < n-1; i++) {
         for (int j = 1; j < m-1; j++) {
-            s_bufd[i][j] = (double) s_buf[i][j];
+            s_bufd[IDX(i, j, m)] = (double) s_buf[IDX(i, j, m)];
         }
     }
     interpolate(n, m, n2, m2, s_bufd, f2);
 
     for (int i = 0; i < n2; i++) {
         for (int j = 0; j < m2; j++) {
-            u2[i][j] = 0;
-            f2[i][j] *= 1.01;
+            u2[IDX(i, j, m2)] = 0;
+            f2[IDX(i, j, m2)] *= 1.01;
         }
     }
 
@@ -1129,15 +1099,15 @@ main(void)
             dl2_norm(n2, m2, res2), max_norm(n2, m2, res2));
 
     // Stabilize double
-    int s_buf2[n2][m2];
-    int s_copy2[n2][m2];
+    int* s_buf2 = malloc(sizeof(double) * n2 * m2);
+    int* s_copy2 = malloc(sizeof(double) * n2 * m2);
     for (int i = 1; i < n2-1; i++) {
         for (int j = 1; j < m2-1; j++) {
-            s_buf2[i][j] = (int) floor(u2[i-1][j])
-                      +    (int) floor(u2[i+1][j])
-                      +    (int) floor(u2[i][j-1])
-                      +    (int) floor(u2[i][j+1])
-                      - 4* (int) floor(u2[i][j]);
+            s_buf2[IDX(i, j, m2)] = (int) floor(u2[IDX(i-1, j, m2)])
+                               +    (int) floor(u2[IDX(i+1, j, m2)])
+                               +    (int) floor(u2[IDX(i, j-1, m2)])
+                               +    (int) floor(u2[IDX(i, j+1, m2)])
+                               - 4* (int) floor(u2[IDX(i, j, m2)]);
         }
     }
 
@@ -1150,18 +1120,18 @@ main(void)
         // copy into s_copy
         for (int i = 1; i < n2-1; i++) {
             for (int j = 1; j < m2-1; j++) {
-                s_copy2[i][j] = s_buf2[i][j];
+                s_copy2[IDX(i, j, m2)] = s_buf2[IDX(i, j, m2)];
             }
         }
 
         // Add burning config
         for (int x = 1; x < n2-1; x++) {
-            s_buf2[1][x] += step;
-            s_buf2[n2-2][x] += step;
+            s_buf2[IDX(1, x, m2)] += step;
+            s_buf2[IDX(n2-2, x, m2)] += step;
         }
         for (int y = 1; y < n2-1; y++) {
-            s_buf2[y][1]   += step;
-            s_buf2[y][n2-2] += step;
+            s_buf2[IDX(y, 1, m2)]   += step;
+            s_buf2[IDX(y, n2-2, m2)] += step;
         }
 
         stabilize_generic(n2, m2, s_buf2);
@@ -1172,7 +1142,7 @@ main(void)
         converged = 1;
         for (int i = 1; i < n2-1; i++) {
             for (int j = 1; j < m2-1; j++) {
-                if (s_copy2[i][j] != s_buf2[i][j]) {
+                if (s_copy2[IDX(i, j, m2)] != s_buf2[IDX(i, j, m2)]) {
                     converged = 0;
                 }
             }
@@ -1180,5 +1150,93 @@ main(void)
     } while (!converged);
 
     fprintf(stderr, "Count burns: %d\n", burns);
-    render_i(n2, s_buf2);
+
+    // Scale up again and set as rhs
+    int n3 = 513;
+    int m3 = 513;
+
+    FULL_N = n3;
+    FULL_M = m3;
+    double* u3 = malloc(sizeof(double) * n3 * m3);
+    double* f3 = malloc(sizeof(double) * n3 * m3);
+    double* s_bufd3 = malloc(sizeof(double) * n * m);
+    double* res3 = malloc(sizeof(double) * n3 * m3);
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            s_bufd3[IDX(i, j, m)] = 0;
+        }
+    }
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m-1; j++) {
+            s_bufd3[IDX(i, j, m)] = (double) s_buf[IDX(i, j, m)];
+        }
+    }
+    interpolate(n, m, n3, m3, s_bufd3, f3);
+
+    for (int i = 0; i < n3; i++) {
+        for (int j = 0; j < m3; j++) {
+            u3[IDX(i, j, m3)] = 0;
+            f3[IDX(i, j, m3)] *= 1.02;
+        }
+    }
+
+    fmg(n3, m3, u3, f3, 0);
+    residual(n3, m3, u3, f3, res3);
+    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
+            dl2_norm(n3, m3, res3), max_norm(n3, m3, res3));
+
+    // Stabilize double
+    int* s_buf3 = malloc(sizeof(double) * n3 * m3);
+    int* s_copy3 = malloc(sizeof(double) * n3 * m3);
+    for (int i = 1; i < n3-1; i++) {
+        for (int j = 1; j < m3-1; j++) {
+            s_buf3[IDX(i, j, m3)] = (int) floor(u3[IDX(i-1, j, m3)])
+                               +    (int) floor(u3[IDX(i+1, j, m3)])
+                               +    (int) floor(u3[IDX(i, j-1, m3)])
+                               +    (int) floor(u3[IDX(i, j+1, m3)])
+                               - 4* (int) floor(u3[IDX(i, j, m3)]);
+        }
+    }
+
+    stabilize_generic(n3, m3, s_buf3);
+
+    converged = 0;
+    burns = 0;
+    step = 20;
+    do {
+        // copy into s_copy
+        for (int i = 1; i < n3-1; i++) {
+            for (int j = 1; j < m3-1; j++) {
+                s_copy3[IDX(i, j, m3)] = s_buf3[IDX(i, j, m3)];
+            }
+        }
+
+        // Add burning config
+        for (int x = 1; x < n3-1; x++) {
+            s_buf3[IDX(1, x, m3)] += step;
+            s_buf3[IDX(n3-2, x, m3)] += step;
+        }
+        for (int y = 1; y < n3-1; y++) {
+            s_buf3[IDX(y, 1, m3)]   += step;
+            s_buf3[IDX(y, n3-2, m3)] += step;
+        }
+
+        stabilize_generic(n3, m3, s_buf3);
+        // render_i(n3, s_buf3);
+        burns++;
+
+        // Check convergance
+        converged = 1;
+        for (int i = 1; i < n3-1; i++) {
+            for (int j = 1; j < m3-1; j++) {
+                if (s_copy3[IDX(i, j, m3)] != s_buf3[IDX(i, j, m3)]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    fprintf(stderr, "Count burns: %d\n", burns);
+    render_i(n3, s_buf3);
 }
