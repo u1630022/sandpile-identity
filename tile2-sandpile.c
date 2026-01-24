@@ -40,7 +40,7 @@
 #define CA4 0xff0000
 #define CX 0x0000ff
 
-static const int DIRECT_SOLVE_SIZE = 40;
+static const int DIRECT_SOLVE_SIZE = 64;
 static const long ALIGNMENT = 64;
 int IDX(int i, int j, int n) { return i * n + j; }
 
@@ -330,67 +330,129 @@ stabilize_generic(int N,
     fprintf(stderr, "Total Spills: %ld\n", totalSpills);
 }
 
+int
+IDX3(int i, int j, int k, int width, int depth) {
+    return i * (width * depth) + j * (depth) + k;
+}
+
+
 static void
 stabilize_small(int N,
                 int M,
                 char* state,
                 int render) // state is buffered only abovev and below
 {
+    long tileSpills = 0;
+    long threadSpills = 0;
     long spills = 0;
     long totalSpills = 0;
+    char* messages = calloc(N/TILE_WIDTH * 2 * N, sizeof(char));
 
     do {
         spills = 0;
 
-        for (int y = 0; y < N; y++) {
-            __m256i vspills = _mm256_set1_epi8(0);
-            long rowSpills = 0;
+        #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
+        for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
 
-            for (int x = 0; x < M; x += 32) {
-                __m256i vv = _mm256_load_si256((void *)&state[IDX(1+y, x, M)]);
-                __m256i vvabove = _mm256_load_si256((void *)&state[IDX(y, x, M)]);
-                __m256i vvbelow = _mm256_load_si256((void *)&state[IDX(2+y, x, M)]);
-                __m256i vpos = _mm256_cmpgt_epi8(vv, _mm256_set1_epi8(0));
-                __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
-                vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
-                vinc = _mm256_and_si256(vinc, vpos);
+            threadSpills = 0;
 
-                vspills = _mm256_add_epi8(vinc, vspills);
+            // import from messages
+            for (int y = 0; y < N; y++) {
+                int tmp = 0;
 
-                _mm256_store_si256((void *)&state[IDX(y, x, M)], _mm256_add_epi8(vvabove, vinc));
-                _mm256_store_si256((void *)&state[IDX(2+y, x, M)], _mm256_add_epi8(vvbelow, vinc));
-
-                __m256i vinc_left = m256_srl8_1(vinc);
-                __m256i vinc_right = m256_sll8_1(vinc);
-
-                __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
-                __m256i vv_new = _mm256_add_epi8(vinc_left,
-                        _mm256_add_epi8(vinc_right,
-                        _mm256_sub_epi8(vv, vinc4)));
-                _mm256_store_si256((void *)&state[IDX(1+y, x, M)], vv_new);
-
-                // tails
-                if (x > 0) {
-                    int left_spill = _mm256_extract_epi8(vinc, 0);
-                    state[IDX(1+y, x - 1, M)] += left_spill;
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, LEFT, y, 2, N)];
+                    messages[IDX3(xx, LEFT, y, 2, N)] = 0;
                 }
-                if (x < M - 32) {
-                    int right_spill = _mm256_extract_epi8(vinc, 31);
-                    state[IDX(1+y, x+32, M)] += right_spill;
+                state[IDX(1+y, xx * TILE_WIDTH, M)] += tmp;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, RIGHT, y, 2, N)];
+                    messages[IDX3(xx, RIGHT, y, 2, N)] = 0;
                 }
+                state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += tmp;
             }
 
-            rowSpills = m256_hadd_all(vspills);
+            for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
+                do {
+                    tileSpills = 0;
+                    __m256i vspills = _mm256_set1_epi8(0);
+                    int ystart = (yy * TILE_HEIGHT) / 2;
+                    int yend = ystart + TILE_HEIGHT;
+                    for (int y = ystart; y < yend; y++) {
+                        int xspills = 0;
+                        int xstart = (xx * TILE_WIDTH);
+                        int xend = xstart + TILE_WIDTH;
 
-            spills += rowSpills;
+                        for (int x = xstart; x < xend; x += 32) {
+                            __m256i vv = _mm256_load_si256((void *)&state[IDX(1+y, x, M)]);
+                            __m256i vvabove = _mm256_load_si256((void *)&state[IDX(y, x, M)]);
+                            __m256i vvbelow = _mm256_load_si256((void *)&state[IDX(2+y, x, M)]);
+                            __m256i vpos = _mm256_cmpgt_epi8(vv, _mm256_set1_epi8(0));
+                            __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
+                            vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
+                            vinc = _mm256_and_si256(vinc, vpos);
+
+                            vspills = _mm256_add_epi8(vinc, vspills);
+
+                            _mm256_store_si256((void *)&state[IDX(y, x, M)], _mm256_add_epi8(vvabove, vinc));
+                            _mm256_store_si256((void *)&state[IDX(2+y, x, M)], _mm256_add_epi8(vvbelow, vinc));
+
+                            __m256i vinc_left = m256_srl8_1(vinc);
+                            __m256i vinc_right = m256_sll8_1(vinc);
+
+                            __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
+                            __m256i vv_new = _mm256_add_epi8(vinc_left,
+                                    _mm256_add_epi8(vinc_right,
+                                    _mm256_sub_epi8(vv, vinc4)));
+                            _mm256_store_si256((void *)&state[IDX(1+y, x, M)], vv_new);
+
+                            // tails
+                            if (x > xstart) {
+                                int left_spill = _mm256_extract_epi8(vinc, 0);
+                                state[IDX(1+y, x - 1, M)] += left_spill;
+                            } else if (xx > 0) {
+                                int left_spill = _mm256_extract_epi8(vinc, 0);
+
+                                #pragma omp atomic update
+                                messages[IDX3(xx - 1, RIGHT, y, 2, N)] += left_spill;
+                            }
+                            if (x < xend - 32) {
+                                int right_spill = _mm256_extract_epi8(vinc, 31);
+                                state[IDX(1+y, x+32, M)] += right_spill;
+                            } else if (xx < N / TILE_WIDTH - 1) {
+                                int right_spill = _mm256_extract_epi8(vinc, 31);
+
+                                #pragma omp atomic update
+                                messages[IDX3(xx + 1, LEFT, y, 2, N)] += right_spill;
+                            }
+                        }
+                    }
+                    tileSpills = m256_hadd_all(vspills);
+                    threadSpills += tileSpills;
+                } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
+            }
+
+            #pragma omp atomic update
+            spills += threadSpills;
         }
 
+        assert(spills >= 0);
+        totalSpills += spills;
         if (render) {
             render_i(N+2, state);
         }
-        totalSpills += spills;
     } while (spills > 0);
 
+    for (int xx = 1; xx < N / TILE_WIDTH - 1; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < N; i++) {
+                assert(messages[IDX3(xx, dir, i, 2, N)] == 0);
+            }
+        }
+    }
     for (int y = 0; y < N; y++) {
         for (int x = 0; x < M; x++) {
             assert(state[IDX(1+y, x, M)] < 4);
@@ -401,6 +463,7 @@ stabilize_small(int N,
     // 3 251 067 552
     fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
 }
+
 
 
 // We want to approximate the odometer of the identity sandpile
@@ -851,6 +914,6 @@ int
 main(void)
 {
     setlocale(LC_ALL, "");
-    // omp_set_num_threads(2);
+    omp_set_num_threads(8);
     poisson_identity(2048, 2048);
 }
