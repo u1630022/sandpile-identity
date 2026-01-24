@@ -23,7 +23,7 @@
 #include <omp.h>
 
 #ifndef SCALE
-#  define SCALE 2
+#  define SCALE 1
 #endif
 
 #define TILE_WIDTH 64
@@ -40,6 +40,7 @@
 #define CA4 0xff0000
 #define CX 0x0000ff
 
+static const int DIRECT_SOLVE_SIZE = 40;
 static const long ALIGNMENT = 64;
 int IDX(int i, int j, int n) { return i * n + j; }
 
@@ -111,20 +112,6 @@ static const long inferno[254] = {
     0xfbfea1, 0xfdffa5
 };
 
-#define zero_messages_type(t) \
-void \
-zero_messages(int N, \
-              t messages[N / TILE_WIDTH][2][N]) \
-{ \
-    for (int xx = 0; xx < N / TILE_WIDTH; xx++) { \
-        for (int dir = LEFT; dir <= RIGHT; dir++) { \
-            for (int i = 0; i < N; i++) { \
-                messages[xx][dir][i] = 0; \
-            } \
-        } \
-    } \
-}
-
 static void
 render_colour(int N,
        unsigned char state[2+N][N])
@@ -149,110 +136,55 @@ render_colour(int N,
     fwrite(buf, sizeof(buf), 1, stdout);
 }
 
-#define render(N, grid) unsigned char buf[3L*N*SCALE*N*SCALE]; \
-                        double min = LONG_MAX; \
-                        double max = LONG_MIN; \
-                        for (int y = 0; y < N; y++) { \
-                            for (int x = 0; x < N; x++) { \
-                                long v = (long) grid[1+y][x]; \
-                                if (v < min) { \
-                                    min = v; \
-                                } \
-                                if (v > max) { \
-                                    max = v; \
-                                } \
-                            } \
-                        } \
-                        for (int y = 0; y < N*SCALE; y++) { \
-                            for (int x = 0; x < N*SCALE; x++) { \
-                                long v = (long) grid[1+y/SCALE][x/SCALE]; \
-                                int idx = (int) (253.0 * (v - min) / (max - min)); \
-                                assert(idx >= 0); \
-                                assert(idx < 254); \
-                                long c = inferno[idx]; \
-                                buf[y*3L*SCALE*N + x*3L + 0] = c >> 16; \
-                                buf[y*3L*SCALE*N + x*3L + 1] = c >>  8; \
-                                buf[y*3L*SCALE*N + x*3L + 2] = c >>  0; \
-                            } \
-                        } \
-                        printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE); \
-                        fwrite(buf, sizeof(buf), 1, stdout);
-
+// full buffer included in N and M
 void
-render_d(int N, int M, double grid[N][M])
+render_d(int N, int M, double* grid)
 {
-    unsigned char buf[3L*N*SCALE*N*SCALE];
-    double min = 10000000.0;
-    double max =-10000000.0;
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < M; x++) {
-            double v = grid[y][x];
-            if (v < min) {
-                min = v;
-            }
-            if (v > max) {
-                max = v;
-            }
-        }
-    }
-    for (int y = 0; y < N*SCALE; y++) {
-        for (int x = 0; x < M*SCALE; x++) {
-            double v = grid[y/SCALE][x/SCALE];
-            int idx = (int) (253.0 * (v - min) / (max - min));
-            assert(idx >= 0);
-            assert(idx < 254);
-            long c = inferno[idx];
-            buf[y*3L*SCALE*N + x*3L + 0] = c >> 16;
-            buf[y*3L*SCALE*N + x*3L + 1] = c >>  8;
-            buf[y*3L*SCALE*N + x*3L + 2] = c >>  0;
-        }
-    }
-    printf("P6\n%d %d\n255\n", N*SCALE, N*SCALE);
-    fwrite(buf, sizeof(buf), 1, stdout);
-}
-
-void
-render_d_buf(int N, int M, double grid[N][M])
-{
-    unsigned char buf[3L*(N-2)*SCALE*(N-2)*SCALE];
-    double min = 10000000.0;
-    double max =-10000000.0;
-    for (int y = 1; y < N-1; y++) {
-        for (int x = 1; x < N-1; x++) {
-            double v = grid[y][x];
-            if (v < min) {
-                min = v;
-            }
-            if (v > max) {
-                max = v;
-            }
-        }
-    }
-    for (int y = 0; y < (N-2)*SCALE; y++) {
-        for (int x = 0; x < (N-2)*SCALE; x++) {
-            double v = grid[1+y/SCALE][1+x/SCALE];
-            int idx = (int) (253.0 * (v - min) / (max - min));
-            assert(idx >= 0);
-            assert(idx < 254);
-            long c = inferno[idx];
-            buf[y*3L*SCALE*(N-2) + x*3L + 0] = c >> 16;
-            buf[y*3L*SCALE*(N-2) + x*3L + 1] = c >>  8;
-            buf[y*3L*SCALE*(N-2) + x*3L + 2] = c >>  0;
-        }
-    }
-    printf("P6\n%d %d\n255\n", (N-2)*SCALE, (N-2)*SCALE);
-    fwrite(buf, sizeof(buf), 1, stdout);
-}
-
-void
-render_i(int N, int* grid)
-{
-    unsigned char buf[3L*(N-2)*SCALE*(N-2)*SCALE];
+    unsigned char* buf = calloc(3L*(N-2)*SCALE*(M-2)*SCALE, sizeof(unsigned char));
     double min = LONG_MAX;
     double max = LONG_MIN;
-    for (int y = 1; y < N-1; y++) {
-        for (int x = 1; x < N-1; x++) {
-            double v = grid[IDX(y, x, N)];
+    for (int y = 0; y < N-2; y++) {
+        for (int x = 0; x < M-2; x++) {
+            double v = grid[IDX(1+y, 1+x, M)];
+            if (v < min) {
+                min = v;
+            }
+            if (v > max) {
+                max = v;
+            }
+        }
+    }
+    for (int y = 0; y < (N-2)*SCALE; y++) {
+        for (int x = 0; x < (M-2)*SCALE; x++) {
+            int idx;
+            if (min == max) {
+                idx = 127;
+            } else {
+                double v = grid[IDX(1+y/SCALE, 1+x/SCALE, M)];
+                idx = (int) (253.0 * (v - min) / (max - min));
+            }
+            assert(idx >= 0);
+            assert(idx < 254);
+            long c = inferno[idx];
+            buf[y*3L*SCALE*(N-2) + x*3L + 0] = c >> 16;
+            buf[y*3L*SCALE*(N-2) + x*3L + 1] = c >>  8;
+            buf[y*3L*SCALE*(N-2) + x*3L + 2] = c >>  0;
+        }
+    }
+    printf("P6\n%d %d\n255\n", (N-2)*SCALE, (M-2)*SCALE);
+    fwrite(buf, 3L*(N-2)*SCALE*(M-2)*SCALE * sizeof(unsigned char), 1, stdout);
+    free(buf);
+}
+
+void
+render_i(int N, char* grid)
+{
+    unsigned char* buf = calloc(3L*(N-2)*SCALE*(N-2)*SCALE, sizeof(unsigned char));
+    double min = LONG_MAX;
+    double max = LONG_MIN;
+    for (int y = 0; y < N-2; y++) {
+        for (int x = 0; x < N-2; x++) {
+            double v = grid[IDX(1+y, x, N-2)];
             if (v < min) {
                 min = v;
             }
@@ -263,8 +195,13 @@ render_i(int N, int* grid)
     }
     for (int y = 0; y < (N-2)*SCALE; y++) {
         for (int x = 0; x < (N-2)*SCALE; x++) {
-            int v = grid[IDX(1+y/SCALE, 1+x/SCALE, N)];
-            int idx = (int) (253.0 * (v - min) / (max - min));
+            int idx;
+            if (min == max) {
+                idx = 127;
+            } else {
+                char v = grid[IDX(1+y/SCALE, x/SCALE, N-2)];
+                idx = (int) (253.0 * (v - min) / (max - min));
+            }
             assert(idx >= 0);
             assert(idx < 254);
             long c = inferno[idx];
@@ -274,7 +211,8 @@ render_i(int N, int* grid)
         }
     }
     printf("P6\n%d %d\n255\n", (N-2)*SCALE, (N-2)*SCALE);
-    fwrite(buf, sizeof(buf), 1, stdout);
+    fwrite(buf, 3L*(N-2)*SCALE*(N-2)*SCALE * sizeof(unsigned char), 1, stdout);
+    free(buf);
 }
 
 // Source - https://stackoverflow.com/a
@@ -394,362 +332,77 @@ stabilize_generic(int N,
 
 static void
 stabilize_small(int N,
-                unsigned char state[2+N][N],
-                unsigned char messages[N / TILE_WIDTH][2][N])
+                int M,
+                char* state,
+                int render) // state is buffered only abovev and below
 {
-    long tileSpills = 0;
-    long threadSpills = 0;
     long spills = 0;
     long totalSpills = 0;
+
     do {
         spills = 0;
 
-        #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
-        for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
+        for (int y = 0; y < N; y++) {
+            __m256i vspills = _mm256_set1_epi8(0);
+            long rowSpills = 0;
 
-            threadSpills = 0;
+            for (int x = 0; x < M; x += 32) {
+                __m256i vv = _mm256_load_si256((void *)&state[IDX(1+y, x, M)]);
+                __m256i vvabove = _mm256_load_si256((void *)&state[IDX(y, x, M)]);
+                __m256i vvbelow = _mm256_load_si256((void *)&state[IDX(2+y, x, M)]);
+                __m256i vpos = _mm256_cmpgt_epi8(vv, _mm256_set1_epi8(0));
+                __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
+                vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
+                vinc = _mm256_and_si256(vinc, vpos);
 
-            // import from messages
-            for (int y = 0; y < N; y++) {
-                int tmp = 0;
+                vspills = _mm256_add_epi8(vinc, vspills);
 
-                #pragma omp atomic capture
-                {
-                    tmp = messages[xx][LEFT][y];
-                    messages[xx][LEFT][y] = 0;
+                _mm256_store_si256((void *)&state[IDX(y, x, M)], _mm256_add_epi8(vvabove, vinc));
+                _mm256_store_si256((void *)&state[IDX(2+y, x, M)], _mm256_add_epi8(vvbelow, vinc));
+
+                __m256i vinc_left = m256_srl8_1(vinc);
+                __m256i vinc_right = m256_sll8_1(vinc);
+
+                __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
+                __m256i vv_new = _mm256_add_epi8(vinc_left,
+                        _mm256_add_epi8(vinc_right,
+                        _mm256_sub_epi8(vv, vinc4)));
+                _mm256_store_si256((void *)&state[IDX(1+y, x, M)], vv_new);
+
+                // tails
+                if (x > 0) {
+                    int left_spill = _mm256_extract_epi8(vinc, 0);
+                    state[IDX(1+y, x - 1, M)] += left_spill;
                 }
-                state[1+y][xx * TILE_WIDTH] += tmp;
-
-                #pragma omp atomic capture
-                {
-                    tmp = messages[xx][RIGHT][y];
-                    messages[xx][RIGHT][y] = 0;
+                if (x < M - 32) {
+                    int right_spill = _mm256_extract_epi8(vinc, 31);
+                    state[IDX(1+y, x+32, M)] += right_spill;
                 }
-                state[1+y][(xx + 1) * TILE_WIDTH - 1] += tmp;
             }
 
-            for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
-                do {
-                    tileSpills = 0;
-                    __m256i vspills = _mm256_set1_epi8(0);
-                    int ystart = (yy * TILE_HEIGHT) / 2;
-                    int yend = ystart + TILE_HEIGHT;
-                    for (int y = ystart; y < yend; y++) {
-                        int xspills = 0;
-                        int xstart = (xx * TILE_WIDTH);
-                        int xend = xstart + TILE_WIDTH;
+            rowSpills = m256_hadd_all(vspills);
 
-                        for (int x = xstart; x < xend; x += 32) {
-                            __m256i vv = _mm256_load_si256((void *)&state[1+y][x]);
-                            __m256i vvabove = _mm256_load_si256((void *)&state[y][x]);
-                            __m256i vvbelow = _mm256_load_si256((void *)&state[2+y][x]);
-                            __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
-                            vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
-
-                            vspills = _mm256_add_epi8(vinc, vspills);
-
-                            _mm256_store_si256((void *)&state[y][x], _mm256_add_epi8(vvabove, vinc));
-                            _mm256_store_si256((void *)&state[2+y][x], _mm256_add_epi8(vvbelow, vinc));
-
-                            __m256i vinc_left = m256_srl8_1(vinc);
-                            __m256i vinc_right = m256_sll8_1(vinc);
-
-                            __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
-                            __m256i vv_new = _mm256_add_epi8(vinc_left,
-                                    _mm256_add_epi8(vinc_right,
-                                    _mm256_sub_epi8(vv, vinc4)));
-                            _mm256_store_si256((void *)&state[1+y][x], vv_new);
-
-                            // tails
-                            if (x > xstart) {
-                                int left_spill = _mm256_extract_epi8(vinc, 0);
-                                state[1+y][x - 1] += left_spill;
-                            } else if (xx > 0) {
-                                int left_spill = _mm256_extract_epi8(vinc, 0);
-
-                                #pragma omp atomic update
-                                messages[xx - 1][RIGHT][y] += left_spill;
-                            }
-                            if (x < xend - 32) {
-                                int right_spill = _mm256_extract_epi8(vinc, 31);
-                                state[1+y][x+32] += right_spill;
-                            } else if (xx < N / TILE_WIDTH - 1) {
-                                int right_spill = _mm256_extract_epi8(vinc, 31);
-
-                                #pragma omp atomic update
-                                messages[xx + 1][LEFT][y] += right_spill;
-                            }
-                        }
-                    }
-                    tileSpills = m256_hadd_all(vspills);
-                    threadSpills += tileSpills;
-                } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
-            }
-
-            #pragma omp atomic update
-            spills += threadSpills;
+            spills += rowSpills;
         }
 
-        assert(spills >= 0);
+        if (render) {
+            render_i(N+2, state);
+        }
         totalSpills += spills;
-        // render();
     } while (spills > 0);
 
-    for (int xx = 1; xx < N / TILE_WIDTH - 1; xx++) {
-        for (int dir = LEFT; dir <= RIGHT; dir++) {
-            for (int i = 0; i < N; i++) {
-                assert(messages[xx][dir][i] == 0);
-            }
-        }
-    }
     for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            assert(state[1+y][x] < 4);
-            assert(state[1+y][x] >= 0);
+        for (int x = 0; x < M; x++) {
+            assert(state[IDX(1+y, x, M)] < 4);
         }
     }
 
-    // 8915347868
-    // 3251067552
+    // 8 915 347 868
+    // 3 251 067 552
     fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
 }
 
-static void
-stabilize_big(int N,
-              int state[2+N][N],
-              int messages[N / TILE_WIDTH][2][N])
-{
-    long tileSpills = 0;
-    long threadSpills = 0;
-    long spills = 0;
-    long totalSpills = 0;
-    do {
-        spills = 0;
 
-        #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
-        for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
-
-            threadSpills = 0;
-
-            // import from messages
-            for (int y = 0; y < N; y++) {
-                int tmp = 0;
-
-                #pragma omp atomic capture
-                {
-                    tmp = messages[xx][LEFT][y];
-                    messages[xx][LEFT][y] = 0;
-                }
-                state[1+y][xx * TILE_WIDTH] += tmp;
-
-                #pragma omp atomic capture
-                {
-                    tmp = messages[xx][RIGHT][y];
-                    messages[xx][RIGHT][y] = 0;
-                }
-                state[1+y][(xx + 1) * TILE_WIDTH - 1] += tmp;
-            }
-
-            for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
-                do {
-                    tileSpills = 0;
-                    __m256i vspills = _mm256_set1_epi8(0);
-                    int ystart = (yy * TILE_HEIGHT) / 2;
-                    int yend = ystart + TILE_HEIGHT;
-                    for (int y = ystart; y < yend; y++) {
-                        int xspills = 0;
-                        int xstart = (xx * TILE_WIDTH);
-                        int xend = xstart + TILE_WIDTH;
-
-                        for (int x = xstart; x < xend; x += 8) {
-                            __m256i vv = _mm256_load_si256((void *)&state[1+y][x]);
-                            __m256i vvabove = _mm256_load_si256((void *)&state[y][x]);
-                            __m256i vvbelow = _mm256_load_si256((void *)&state[2+y][x]);
-                            __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
-                            vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
-
-                            vspills = _mm256_add_epi8(vinc, vspills);
-
-                            _mm256_store_si256((void *)&state[y][x], _mm256_add_epi8(vvabove, vinc));
-                            _mm256_store_si256((void *)&state[2+y][x], _mm256_add_epi8(vvbelow, vinc));
-
-                            __m256i vinc_left = m256_srl32_1(vinc);
-                            __m256i vinc_right = m256_sll32_1(vinc);
-
-                            __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
-                            __m256i vv_new = _mm256_add_epi8(vinc_left,
-                                    _mm256_add_epi8(vinc_right,
-                                    _mm256_sub_epi8(vv, vinc4)));
-                            _mm256_store_si256((void *)&state[1+y][x], vv_new);
-
-                            // tails
-                            if (x > xstart) {
-                                int left_spill = _mm256_extract_epi32(vinc, 0);
-                                state[1+y][x - 1] += left_spill;
-                            } else if (xx > 0) {
-                                int left_spill = _mm256_extract_epi32(vinc, 0);
-
-                                #pragma omp atomic update
-                                messages[xx - 1][RIGHT][y] += left_spill;
-                            }
-                            if (x < xend - 8) {
-                                int right_spill = _mm256_extract_epi32(vinc, 7);
-                                state[1+y][x+8] += right_spill;
-                            } else if (xx < N / TILE_WIDTH - 1) {
-                                int right_spill = _mm256_extract_epi32(vinc, 7);
-
-                                #pragma omp atomic update
-                                messages[xx + 1][LEFT][y] += right_spill;
-                            }
-                        }
-                    }
-                    tileSpills = m256_hadd_all(vspills);
-                    threadSpills += tileSpills;
-                } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
-            }
-
-            #pragma omp atomic update
-            spills += threadSpills;
-        }
-
-        assert(spills >= 0);
-        totalSpills += spills;
-        // render();
-    } while (spills > 0);
-
-    for (int xx = 1; xx < N / TILE_WIDTH - 1; xx++) {
-        for (int dir = LEFT; dir <= RIGHT; dir++) {
-            for (int i = 0; i < N; i++) {
-                assert(messages[xx][dir][i] == 0);
-            }
-        }
-    }
-    for (int y = 0; y < N; y++) {
-        for (int x = 0; x < N; x++) {
-            assert(state[1+y][x] < 4);
-            assert(state[1+y][x] >= 0);
-        }
-    }
-
-    // 8915347868
-    // 3251067552
-    fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
-}
-
-#define stabilize(dummy, N, state, messages) _Generic((dummy), \
-        unsigned char: stabilize_small, \
-        int: stabilize_big)(N, state, messages)
-
-
-#define states_eq_type(t) \
-int \
-states_eq(int N, \
-          t state[2+N][N], \
-          t state_copy[2+N][N]) \
-{ \
-    for (int y = 0; y < N; y++) { \
-        for (int x = 0; x < N; x++) { \
-            if (state[1+y][x] != state_copy[1+y][x]) { \
-                return 0; \
-            } \
-        } \
-    } \
-    return 1; \
-}
-
-#define states_copy_type(t) \
-void \
-states_copy(int N, \
-            t state[2+N][N], \
-            t state_copy[2+N][N]) \
-{ \
-    for (int y = 0; y < N; y++) { \
-        for (int x = 0; x < N; x++) { \
-            state_copy[1+y][x] = state[1+y][x]; \
-        } \
-    } \
-}
-
-#define add_burning_config_type(t) \
-void \
-add_burning_config(int N, \
-                   t state[2+N][N]) \
-{ \
-    for (int x = 0; x < N; x++) { \
-        state[1][x] += 1; \
-        state[N][x] += 1; \
-    } \
-    for (int y = 1; y < N-1; y++) { \
-        state[1+y][0]   += 1; \
-        state[1+y][N-1] += 1; \
-    } \
-    state[1][0]   += 1; \
-    state[1][N-1] += 1; \
-    state[N][0]   += 1; \
-    state[N][N-1] += 1; \
-}
-
-#define is_identity_type(t) \
-int \
-is_identity(int N, \
-            t state[2+N][N], \
-            t state_copy[2+N][N], \
-            t messages[N / TILE_WIDTH][2][N]) \
-{ \
-    states_copy(N, state, state_copy); \
-    add_burning_config(N, state); \
-    t dummy; \
-    stabilize(dummy, N, state, messages); \
-    return states_eq(N, state, state_copy); \
-}
-
-#define subtraction_algo_type(t) \
-void \
-subtraction_algo(int N, \
-                 t state[2+N][N], \
-                 t messages[N / TILE_WIDTH][2][N]) \
-{ \
-    for (int y = 0; y < N; y++) { \
-        for (int x = 0; x < N; x++) { \
-            state[1+y][x] = 6; \
-        } \
-    } \
-    t dummy; \
-    stabilize(dummy, N, state, messages); \
-    for (int y = 0; y < N; y++) { \
-        for (int x = 0; x < N; x++) { \
-            state[1+y][x] = 6 - state[1+y][x]; \
-        } \
-    } \
-    stabilize(dummy, N, state, messages); \
-}
-
-#define exp_burning_algo_type(t) \
-void \
-exp_burning_algo(int N, \
-                 t state[2+N][N], \
-                 t state_copy[2+N][N], \
-                 t messages[N / TILE_WIDTH][2][N]) \
-{ \
-    for (int y = 0; y < N; y++) { \
-        for (int x = 0; x < N; x++) { \
-            state[1+y][x] = 0; \
-        } \
-    } \
-    zero_messages(N, messages); \
-    add_burning_config(N, state); \
-    t dummy; \
-    do { \
-        for (int y = 0; y < N; y++) { \
-            for (int x = 0; x < N; x++) { \
-                state[1+y][x] *= 2; \
-            } \
-        } \
-        stabilize(dummy, N, state, messages); \
-    } while (!is_identity(N, state, state_copy, messages)); \
-}
-
-// TODO:
 // We want to approximate the odometer of the identity sandpile
 // We do this by considering the equations Au = f (A: reduced laplacian, u: odometer, f: sandpile)
 // We do this by upscaling a smaller identity by 2 and setting this as f and solving for u.
@@ -803,21 +456,62 @@ void gauss_seidel(int n, int m, double *u, double *f, int iter) {
     }
 }
 
+// Consider n_fine = m_fine = 5
+// then n_coarse = m_coarse = 3
+// for 1,1 on the coarse grid, we should sample around 2,2 on the fine grid
+
 // Full-weighting
-void inject(int n_fine, int m_fine, double *fine, double *coarse) {
-    int n_coarse = n_fine / 2 + 1;
-    int m_coarse = m_fine / 2 + 1;
+void inject_odd(int n_fine, int m_fine, double *fine, double *coarse) {
+    int n_coarse = (n_fine + 1) / 2;
+    int m_coarse = (m_fine + 1) / 2;
     for (int i = 1; i < n_coarse-1; i++) {
         for (int j = 1; j < m_coarse-1; j++) {
             coarse[IDX(i, j, m_coarse)] =
-                0.25 * fine[IDX(2*i-1, 2*j-1, m_fine)] +
+                0.25 * fine[IDX(2*i, 2*j, m_fine)] +
                 0.125 * (
-                    fine[IDX(2*i-1, 2*j, m_fine)] + fine[IDX(2*i-1, 2*j+1, m_fine)] +
-                    fine[IDX(2*i, 2*j-1, m_fine)] + fine[IDX(2*i+1, 2*j-1, m_fine)]) +
+                    fine[IDX(2*i-1, 2*j, m_fine)] + fine[IDX(2*i+1, 2*j, m_fine)] +
+                    fine[IDX(2*i, 2*j-1, m_fine)] + fine[IDX(2*i, 2*j+1, m_fine)]) +
                 0.0625 * (
-                    fine[IDX(2*i, 2*j, m_fine)] + fine[IDX(2*i, 2*j+1, m_fine)] +
-                    fine[IDX(2*i+1, 2*j, m_fine)] + fine[IDX(2*i+1, 2*j+1, m_fine)]);
+                    fine[IDX(2*i-1, 2*j-1, m_fine)] + fine[IDX(2*i-1, 2*j+1, m_fine)] +
+                    fine[IDX(2*i+1, 2*j-1, m_fine)] + fine[IDX(2*i+1, 2*j+1, m_fine)]);
         }
+    }
+}
+
+// Consider n_fine = m_fine = 6
+// then n_coarse = m_coarse = 3
+// for 1,1 on the coarse grid, we should sample around 2,2 to 3,3 on the fine grid
+// KERNEL = [[1 3 3 1]
+//           [3 9 9 3]
+//           [3 9 9 3]
+//           [1 3 3 1]] * 1/64
+
+void inject_even(int n_fine, int m_fine, double *fine, double *coarse) {
+    int n_coarse = n_fine / 2;
+    int m_coarse = m_fine / 2;
+    for (int i = 1; i < n_coarse-1; i++) {
+        for (int j = 1; j < m_coarse-1; j++) {
+            coarse[IDX(i, j, m_coarse)] = 1.0/64 * (
+                9 * (
+                    fine[IDX(2*i, 2*j, m_fine)] + fine[IDX(2*i+1, 2*j, m_fine)] +
+                    fine[IDX(2*i, 2*j+1, m_fine)] + fine[IDX(2*i+1, 2*j+1, m_fine)]) +
+                3 * (
+                    fine[IDX(2*i-1, 2*j, m_fine)] + fine[IDX(2*i-1, 2*j+1, m_fine)] + // TOP
+                    fine[IDX(2*i, 2*j+2, m_fine)] + fine[IDX(2*i+1, 2*j+2, m_fine)] + // RIGHT
+                    fine[IDX(2*i+2, 2*j, m_fine)] + fine[IDX(2*i+2, 2*j+1, m_fine)] + // BOTTOM
+                    fine[IDX(2*i, 2*j-1, m_fine)] + fine[IDX(2*i+1, 2*j-1, m_fine)]) +// LEFT
+                1 * (
+                    fine[IDX(2*i-1, 2*j-1, m_fine)] + fine[IDX(2*i-1, 2*j+2, m_fine)] +
+                    fine[IDX(2*i+2, 2*j-1, m_fine)] + fine[IDX(2*i+2, 2*j+2, m_fine)]));
+        }
+    }
+}
+
+void inject(int n_fine, int m_fine, double *fine, double *coarse) {
+    if (n_fine % 2 == 0) {
+        inject_even(n_fine, m_fine, fine, coarse);
+    } else {
+        inject_odd(n_fine, m_fine, fine, coarse);
     }
 }
 
@@ -844,6 +538,35 @@ void interpolate(int n_coarse, int m_coarse, int n_fine, int m_fine, double *coa
                 dx * (1 - dy) * coarse[IDX(x1, y0, m_coarse)] +
                 (1 - dx) * dy * coarse[IDX(x0, y1, m_coarse)] +
                 dx * dy * coarse[IDX(x1, y1, m_coarse)];
+        }
+    }
+}
+
+// fine includes the zero buffer
+// sand is only buffered in n
+void sandpile2f(int n_sand, int m_sand, int n_fine, int m_fine, char* coarse, double *fine) {
+    double scale_y = ((double)(n_sand - 3.0001)) / (n_fine - 3);
+    double scale_x = ((double)(m_sand - 1.0001)) / (m_fine - 3);
+
+    for (int i = 1; i < n_fine - 1; i++) {
+        for (int j = 1; j < m_fine - 1; j++) {
+            double x = (j-1) * scale_x;
+            double y = (i-1) * scale_y;
+
+            int x0 = (int)floor(x);
+            int y0 = (int)floor(y);
+            int x1 = x0 + 1;
+            int y1 = y0 + 1;
+
+            double dx = x - x0;
+            double dy = y - y0;
+
+            // Bilinear interpolation
+            fine[IDX(i, j, m_fine)] =
+                (1 - dx) * (1 - dy) * coarse[IDX(1+y0, x0, m_sand)] +
+                dx * (1 - dy) * coarse[IDX(1+y1, x0, m_sand)] +
+                (1 - dx) * dy * coarse[IDX(1+y0, x1, m_sand)] +
+                dx * dy * coarse[IDX(1+y1, x1, m_sand)];
         }
     }
 }
@@ -887,20 +610,30 @@ double dl2_norm(int n, int m, double *arr) {
     return norm;
 }
 
+// -4v11 + v12 + v21 = f11 * h2
+
 void vcycle(int n, int m, double *u, double *f, int depth) {
 
-    if (n <= 3 || m <= 3) {
-        assert(n == 3);
-        assert(m == 3);
+    if (n <= 4 || m <= 4) {
+        assert(n == m);
+        assert(n >= 3);
         double h2 = ((FULL_N-1)*(FULL_M-1)) * 1.0 / ((n-1)*(m-1));
-        u[IDX(1, 1, m)] = -0.25 * f[IDX(1, 1, m)] * h2;
+        if (n == 3) {
+            u[IDX(1, 1, m)] = -0.25 * f[IDX(1, 1, m)] * h2;
+        } else {
+            // assume symmetric solution
+            u[IDX(1, 1, m)] = -0.5 * f[IDX(1, 1, m)] * h2;
+            u[IDX(1, 2, m)] = -0.5 * f[IDX(1, 2, m)] * h2;
+            u[IDX(2, 1, m)] = -0.5 * f[IDX(2, 1, m)] * h2;
+            u[IDX(2, 2, m)] = -0.5 * f[IDX(2, 2, m)] * h2;
+        }
         return;
     }
 
     double *res = malloc(n * m * sizeof(double));
     double *u_correction = malloc(n * m * sizeof(double));
-    int n_coarse = n/2 + 1;
-    int m_coarse = m/2 + 1;
+    int n_coarse = (n + 1)/2;
+    int m_coarse = (m + 1)/2;
     double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
     double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
 
@@ -932,15 +665,15 @@ void vcycle(int n, int m, double *u, double *f, int depth) {
 }
 
 void fmg(int n, int m, double *u, double *f, int depth) {
-    if (n <= 3 || m <= 3) {
-        assert(n == 3);
-        assert(m == 3);
+    if (n <= 4 || m <= 4) {
+        assert(n == m);
+        assert(n >= 3);
         vcycle(n, m, u, f, 0);
         return;
     }
 
-    int n_coarse = n/2 + 1;
-    int m_coarse = m/2 + 1;
+    int n_coarse = (n + 1)/2;
+    int m_coarse = (m + 1)/2;
     double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
     double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
 
@@ -955,27 +688,162 @@ void fmg(int n, int m, double *u, double *f, int depth) {
     interpolate(n_coarse, m_coarse, n, m, coarse_u, u);
 
     vcycle(n, m, u, f, 0);
+    vcycle(n, m, u, f, 0);
 
     free(coarse_u);
     free(coarse_f);
 }
 
 
-#define settype(t) \
-    zero_messages_type(t) \
-    states_copy_type(t) \
-    add_burning_config_type(t) \
-    states_eq_type(t) \
-    is_identity_type(t) \
-    exp_burning_algo_type(t) \
-    subtraction_algo_type(t)
+void
+poisson_identity_helper(int n, int m,
+                        int small_n, int small_m,
+                        char* small_identity, char* identity,
+                        double amplification, int step_size) {
+    FULL_N = n;
+    FULL_M = m+2;
+    double* u = calloc(n * (m+2), sizeof(double));
+    double* f = calloc(n * (m+2), sizeof(double));
+    double* res = calloc(n * (m+2), sizeof(double));
+    int* ident_copy = calloc(n * m, sizeof(int));
+    // TODO this just looks wrong idk?
+    sandpile2f(small_n, small_m, n, m+2, small_identity, f);
+    // render_d(n, m+2, f);
 
-// Either unsigned char or int
-settype(unsigned char)
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 1; j < m+1; j++) {
+            f[IDX(i, j, m+2)] *= amplification;
+        }
+    }
+
+    fmg(n, m+2, u, f, 0);
+    residual(n, m+2, u, f, res);
+    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
+            dl2_norm(n, m+2, res), max_norm(n, m+2, res));
+    // render_d(n, m+2, u);
+
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 0; j < m; j++) {
+            int chips = (int) (
+                -4 * floor(u[IDX(i, j+1, m+2)])
+                +    floor(u[IDX(i+1, j+1, m+2)])
+                +    floor(u[IDX(i, j+2, m+2)])
+                +    floor(u[IDX(i-1, j+1, m+2)])
+                +    floor(u[IDX(i, j+0, m+2)])
+            );
+            assert(chips >= -8);
+            assert(chips < 12);
+            identity[IDX(i, j, m)] = (char) (chips);
+        }
+    }
+
+    // render_i(n, identity);
+    stabilize_small(n-2, m, identity, 0);
+    // render_i(n, identity);
+
+    int converged = 0;
+    int burns = 0;
+
+    do {
+        // copy into s_copy
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                ident_copy[IDX(i, j, m)] = identity[IDX(i, j, m)];
+            }
+        }
+
+        // Add burning config
+        for (int x = 0; x < m; x++) {
+            identity[IDX(1, x, m)] += step_size;
+            identity[IDX(n-2, x, m)] += step_size;
+        }
+        for (int y = 1; y < n-1; y++) {
+            identity[IDX(y, 0, m)]   += step_size;
+            identity[IDX(y, m-1, m)] += step_size;
+        }
+
+        stabilize_small(n-2, m, identity, 0);
+        // render_i(n, identity);
+        burns++;
+
+        // Check convergance
+        converged = 1;
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                if (ident_copy[IDX(i, j, m)] != identity[IDX(i, j, m)]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    free(u);
+    free(f);
+    free(res);
+    free(ident_copy);
+}
+
+void
+poisson_identity(int n, int m) {
+    // 1.1 malloc all the identity grids we need
+    // 1.2 maybe align them
+    // 2.  Direct solve the smallest identity
+    // 3.  Call helper func to solve all other identity grids
+
+    // For now rectangular grids wont work
+    assert(n == m);
+    int grid_count = 1; // start at one to account for direct solve grid
+    int tmp_n = n;
+    while (tmp_n > DIRECT_SOLVE_SIZE) {
+        tmp_n /= 2;
+        grid_count++;
+    }
+
+    char** grids = malloc(sizeof(char*) * grid_count);
+    int* ns = malloc(sizeof(int) * grid_count);
+    int* ms = malloc(sizeof(int) * grid_count);
+    int tmp_m = m;
+    tmp_n = n;
+    for (int i = 0; i < grid_count; i++) {
+        grids[grid_count - i - 1] = aligned_alloc(ALIGNMENT, sizeof(char) * (tmp_n+2) * (tmp_m));
+        ns[grid_count - i - 1] = tmp_n+2;
+        ms[grid_count - i - 1] = tmp_m;
+        tmp_n /= 2;
+        tmp_m /= 2;
+    }
+
+    // Use subtraction algo to directly solve smallest identity
+    char* direct_grid = grids[0];
+    for (int i = 1; i < ns[0]-1; i++) {
+        for (int j = 0; j < ms[0]; j++) {
+            direct_grid[IDX(i, j, ms[0])] = 6;
+        }
+    }
+    stabilize_small(ns[0]-2, ms[0], direct_grid, 0);
+    for (int i = 1; i < ns[0]-1; i++) {
+        for (int j = 0; j < ms[0]; j++) {
+            direct_grid[IDX(i, j, ms[0])] = 6 - direct_grid[IDX(i, j, ms[0])];
+        }
+    }
+    stabilize_small(ns[0]-2, ms[0], direct_grid, 0);
+
+    // Iterate upto the largest grid
+    for (int i = 1; i < grid_count; i++) {
+        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1.01, 20);
+    }
+
+    // Party!!!
+    render_i(ns[grid_count-1], grids[grid_count-1]);
+
+    free(ns);
+    free(ms);
+    for (int i = 0; i < grid_count; i++) {
+        free(grids[i]);
+    }
+    free(grids);
+}
 
 // TODO:
-// 1. Rework functions to take pointers instead of variable arrays so that we can calculate larger identities
-// 2. Implement odd even reduction and interpolation so that we can converge poisson solutions for all grid sizes.
 // 3. Tweak base solver so that we can solve rectangular grids
 // 4. Test recursive sandpile-poisson method
 // 5. Benchmark methods
@@ -983,260 +851,6 @@ int
 main(void)
 {
     setlocale(LC_ALL, "");
-    // omp_set_num_threads(4);
-
-    // int N = 256;
-    // __attribute__((aligned(64))) unsigned char state[2+N][N];
-    // __attribute__((aligned(64))) unsigned char state_copy[2+N][N];
-    // __attribute__((aligned(64))) unsigned char messages[N / TILE_WIDTH][2][N];
-
-    // exp_burning_algo(N, state, state_copy, messages);
-    // render(N, state);
-
-    int n = 129, m = 129;
-    FULL_N = n;
-    FULL_M = m;
-    double* u = malloc(sizeof(double) * n * m);
-    double* f = malloc(sizeof(double) * n * m);
-    double* res = malloc(sizeof(double) * n * m);
-
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < m; j++) {
-            f[IDX(i, j, m)] = 2.35;
-            u[IDX(i, j, m)] = 0.0;
-        }
-    }
-
-    fmg(n, m, u, f, 0);
-    residual(n, m, u, f, res);
-    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
-            dl2_norm(n, m, res), max_norm(n, m, res));
-
-    int* s_buf = malloc(sizeof(int) * n * m);
-    int* s_copy = malloc(sizeof(int) * n * m);
-    for (int i = 1; i < n-1; i++) {
-        for (int j = 1; j < m-1; j++) {
-            s_buf[IDX(i, j, m)] =  (int) floor(u[IDX(i-1, j, m)])
-                              +    (int) floor(u[IDX(i+1, j, m)])
-                              +    (int) floor(u[IDX(i, j-1, m)])
-                              +    (int) floor(u[IDX(i, j+1, m)])
-                              - 4* (int) floor(u[IDX(i, j, m)]);
-        }
-    }
-
-    stabilize_generic(n, m, s_buf);
-
-    int converged = 0;
-    int burns = 0;
-    do {
-        // copy into s_copy
-        for (int i = 1; i < n-1; i++) {
-            for (int j = 1; j < m-1; j++) {
-                s_copy[IDX(i, j, m)] = s_buf[IDX(i, j, m)];
-            }
-        }
-
-        // Add burning config
-        for (int x = 1; x < n-1; x++) {
-            s_buf[IDX(1, x, m)] += 4;
-            s_buf[IDX(n-2, x, m)] += 4;
-        }
-        for (int y = 1; y < n-1; y++) {
-            s_buf[IDX(y, 1, m)]   += 4;
-            s_buf[IDX(y, n-2, m)] += 4;
-        }
-
-        stabilize_generic(n, m, s_buf);
-        // render_i(n, s_buf);
-        burns++;
-
-        // Check convergance
-        converged = 1;
-        for (int i = 1; i < n-1; i++) {
-            for (int j = 1; j < m-1; j++) {
-                if (s_copy[IDX(i, j, m)] != s_buf[IDX(i, j, m)]) {
-                    converged = 0;
-                }
-            }
-        }
-    } while (!converged);
-
-    fprintf(stderr, "Count burns: %d\n", burns);
-
-    // Scale up and set as rhs
-    int n2 = 257;
-    int m2 = 257;
-
-    FULL_N = n2;
-    FULL_M = m2;
-    double* u2 = malloc(sizeof(double) * n2 * m2);
-    double* f2 = malloc(sizeof(double) * n2 * m2);
-    double* s_bufd = malloc(sizeof(double) * n * m);
-    double* res2 = malloc(sizeof(double) * n2 * m2);
-
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < m; j++) {
-            s_bufd[IDX(i, j, m)] = 0;
-        }
-    }
-    for (int i = 1; i < n-1; i++) {
-        for (int j = 1; j < m-1; j++) {
-            s_bufd[IDX(i, j, m)] = (double) s_buf[IDX(i, j, m)];
-        }
-    }
-    interpolate(n, m, n2, m2, s_bufd, f2);
-
-    for (int i = 0; i < n2; i++) {
-        for (int j = 0; j < m2; j++) {
-            u2[IDX(i, j, m2)] = 0;
-            f2[IDX(i, j, m2)] *= 1.01;
-        }
-    }
-
-    fmg(n2, m2, u2, f2, 0);
-    residual(n2, m2, u2, f2, res2);
-    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
-            dl2_norm(n2, m2, res2), max_norm(n2, m2, res2));
-
-    // Stabilize double
-    int* s_buf2 = malloc(sizeof(double) * n2 * m2);
-    int* s_copy2 = malloc(sizeof(double) * n2 * m2);
-    for (int i = 1; i < n2-1; i++) {
-        for (int j = 1; j < m2-1; j++) {
-            s_buf2[IDX(i, j, m2)] = (int) floor(u2[IDX(i-1, j, m2)])
-                               +    (int) floor(u2[IDX(i+1, j, m2)])
-                               +    (int) floor(u2[IDX(i, j-1, m2)])
-                               +    (int) floor(u2[IDX(i, j+1, m2)])
-                               - 4* (int) floor(u2[IDX(i, j, m2)]);
-        }
-    }
-
-    stabilize_generic(n2, m2, s_buf2);
-
-    converged = 0;
-    burns = 0;
-    int step = 10;
-    do {
-        // copy into s_copy
-        for (int i = 1; i < n2-1; i++) {
-            for (int j = 1; j < m2-1; j++) {
-                s_copy2[IDX(i, j, m2)] = s_buf2[IDX(i, j, m2)];
-            }
-        }
-
-        // Add burning config
-        for (int x = 1; x < n2-1; x++) {
-            s_buf2[IDX(1, x, m2)] += step;
-            s_buf2[IDX(n2-2, x, m2)] += step;
-        }
-        for (int y = 1; y < n2-1; y++) {
-            s_buf2[IDX(y, 1, m2)]   += step;
-            s_buf2[IDX(y, n2-2, m2)] += step;
-        }
-
-        stabilize_generic(n2, m2, s_buf2);
-        // render_i(n2, s_buf2);
-        burns++;
-
-        // Check convergance
-        converged = 1;
-        for (int i = 1; i < n2-1; i++) {
-            for (int j = 1; j < m2-1; j++) {
-                if (s_copy2[IDX(i, j, m2)] != s_buf2[IDX(i, j, m2)]) {
-                    converged = 0;
-                }
-            }
-        }
-    } while (!converged);
-
-    fprintf(stderr, "Count burns: %d\n", burns);
-
-    // Scale up again and set as rhs
-    int n3 = 513;
-    int m3 = 513;
-
-    FULL_N = n3;
-    FULL_M = m3;
-    double* u3 = malloc(sizeof(double) * n3 * m3);
-    double* f3 = malloc(sizeof(double) * n3 * m3);
-    double* s_bufd3 = malloc(sizeof(double) * n * m);
-    double* res3 = malloc(sizeof(double) * n3 * m3);
-
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < m; j++) {
-            s_bufd3[IDX(i, j, m)] = 0;
-        }
-    }
-    for (int i = 1; i < n-1; i++) {
-        for (int j = 1; j < m-1; j++) {
-            s_bufd3[IDX(i, j, m)] = (double) s_buf[IDX(i, j, m)];
-        }
-    }
-    interpolate(n, m, n3, m3, s_bufd3, f3);
-
-    for (int i = 0; i < n3; i++) {
-        for (int j = 0; j < m3; j++) {
-            u3[IDX(i, j, m3)] = 0;
-            f3[IDX(i, j, m3)] *= 1.02;
-        }
-    }
-
-    fmg(n3, m3, u3, f3, 0);
-    residual(n3, m3, u3, f3, res3);
-    fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
-            dl2_norm(n3, m3, res3), max_norm(n3, m3, res3));
-
-    // Stabilize double
-    int* s_buf3 = malloc(sizeof(double) * n3 * m3);
-    int* s_copy3 = malloc(sizeof(double) * n3 * m3);
-    for (int i = 1; i < n3-1; i++) {
-        for (int j = 1; j < m3-1; j++) {
-            s_buf3[IDX(i, j, m3)] = (int) floor(u3[IDX(i-1, j, m3)])
-                               +    (int) floor(u3[IDX(i+1, j, m3)])
-                               +    (int) floor(u3[IDX(i, j-1, m3)])
-                               +    (int) floor(u3[IDX(i, j+1, m3)])
-                               - 4* (int) floor(u3[IDX(i, j, m3)]);
-        }
-    }
-
-    stabilize_generic(n3, m3, s_buf3);
-
-    converged = 0;
-    burns = 0;
-    step = 20;
-    do {
-        // copy into s_copy
-        for (int i = 1; i < n3-1; i++) {
-            for (int j = 1; j < m3-1; j++) {
-                s_copy3[IDX(i, j, m3)] = s_buf3[IDX(i, j, m3)];
-            }
-        }
-
-        // Add burning config
-        for (int x = 1; x < n3-1; x++) {
-            s_buf3[IDX(1, x, m3)] += step;
-            s_buf3[IDX(n3-2, x, m3)] += step;
-        }
-        for (int y = 1; y < n3-1; y++) {
-            s_buf3[IDX(y, 1, m3)]   += step;
-            s_buf3[IDX(y, n3-2, m3)] += step;
-        }
-
-        stabilize_generic(n3, m3, s_buf3);
-        // render_i(n3, s_buf3);
-        burns++;
-
-        // Check convergance
-        converged = 1;
-        for (int i = 1; i < n3-1; i++) {
-            for (int j = 1; j < m3-1; j++) {
-                if (s_copy3[IDX(i, j, m3)] != s_buf3[IDX(i, j, m3)]) {
-                    converged = 0;
-                }
-            }
-        }
-    } while (!converged);
-
-    fprintf(stderr, "Count burns: %d\n", burns);
-    render_i(n3, s_buf3);
+    // omp_set_num_threads(2);
+    poisson_identity(2048, 2048);
 }
