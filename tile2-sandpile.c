@@ -20,10 +20,11 @@
 #include <locale.h>
 #include <math.h>
 #include <stdio.h>
+#include <time.h>
 #include <omp.h>
 
 #ifndef SCALE
-#  define SCALE 1
+#  define SCALE 8
 #endif
 
 #define TILE_WIDTH 64
@@ -42,6 +43,7 @@
 
 static const int DIRECT_SOLVE_SIZE = 64;
 static const long ALIGNMENT = 64;
+static const double SPARSE_THRESHOLD = 0.05;
 int IDX(int i, int j, int n) { return i * n + j; }
 
 // Inferno palette
@@ -215,6 +217,72 @@ render_i(int N, char* grid)
     free(buf);
 }
 
+typedef struct {
+    int* data;       // Pointer to the stack data
+    int capacity;    // Current capacity of the stack
+    int top;         // Index of the top element
+} IntStack;
+
+// Initialize a new stack
+IntStack* create_stack(int initial_capacity) {
+    IntStack* stack = (IntStack*)malloc(sizeof(IntStack));
+    if (!stack) {
+        perror("Failed to allocate memory for stack");
+        exit(EXIT_FAILURE);
+    }
+    stack->data = (int*)malloc(initial_capacity * sizeof(int));
+    if (!stack->data) {
+        perror("Failed to allocate memory for stack data");
+        free(stack);
+        exit(EXIT_FAILURE);
+    }
+    stack->capacity = initial_capacity;
+    stack->top = -1; // Stack is initially empty
+    return stack;
+}
+
+// Double the capacity of the stack
+void expand_stack(IntStack* stack) {
+    int new_capacity = stack->capacity * 2;
+    int* new_data = (int*)realloc(stack->data, new_capacity * sizeof(int));
+    if (!new_data) {
+        perror("Failed to expand stack");
+        exit(EXIT_FAILURE);
+    }
+    stack->data = new_data;
+    stack->capacity = new_capacity;
+}
+
+// Push an integer onto the stack
+void push(IntStack* stack, int value) {
+    // assert(value < 65 * 64);
+    // assert(value >= 64);
+    if (stack->top == stack->capacity - 1) {
+        expand_stack(stack);
+    }
+    stack->data[++stack->top] = value;
+}
+
+// Pop an integer from the stack
+int pop(IntStack* stack) {
+    if (stack->top == -1) {
+        fprintf(stderr, "Stack underflow\n");
+        exit(EXIT_FAILURE);
+    }
+    return stack->data[stack->top--];
+}
+
+// Check if the stack is empty
+int is_empty(IntStack* stack) {
+    return stack->top == -1;
+}
+
+// Free the stack memory
+void free_stack(IntStack* stack) {
+    free(stack->data);
+    free(stack);
+}
+
 // Source - https://stackoverflow.com/a
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
 // Retrieved 2025-12-11, License - CC BY-SA 3.0
@@ -336,20 +404,154 @@ IDX3(int i, int j, int k, int width, int depth) {
 }
 
 
+
+void
+stabilize_sparse(int N,
+                 int M,
+                 char* state,
+                 int render)
+{
+    long spills = 0;
+    long checks = 0;
+    long totalSpills = 0;
+    char* messages = calloc(M/TILE_WIDTH * 2 * N, sizeof(char));
+    clock_t start_c = clock();
+
+    // TODO: should be made private
+    IntStack* stacks[M/TILE_WIDTH];
+    for (int i = 0; i < M/TILE_WIDTH; i++) {
+        stacks[i] = create_stack(10);
+    }
+
+    do {
+        spills = 0;
+
+        #pragma omp parallel for schedule(static, 1)
+        for (int xx = 0; xx < M / TILE_WIDTH; xx++) {
+            int xstart = (xx * TILE_WIDTH);
+            int xend = xstart + TILE_WIDTH;
+            long localSpills = 0;
+            long localChecks = 0;
+            IntStack* stack = stacks[xx];
+
+            // import from messages
+            for (int y = 0; y < N; y++) {
+                int tmp = 0;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, LEFT, y, 2, N)];
+                    messages[IDX3(xx, LEFT, y, 2, N)] = 0;
+                }
+                state[IDX(1+y, xx * TILE_WIDTH, M)] += tmp;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, RIGHT, y, 2, N)];
+                    messages[IDX3(xx, RIGHT, y, 2, N)] = 0;
+                }
+                state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += tmp;
+            }
+
+            for (int y = 0; y < N; y++) {
+                for (int x = xend - 1; x >= xstart; x--) {
+                    if (state[IDX(1+y, x, M)] >= 4) {
+                        push(stack, IDX(1+y, x, M));
+                        localChecks++;
+                    }
+                }
+            }
+
+            while (!is_empty(stack)) {
+                int idx = pop(stack);
+                localChecks++;
+                if (state[idx] >= 4) {
+                    localSpills++;
+                    state[idx] -= 4;
+                    state[idx+M] += 1;
+                    if ((idx/M < N) && state[idx+M] >= 4) {
+                        push(stack, idx+M);
+                    }
+                    state[idx-M] += 1;
+                    if ((idx > 2*M) && state[idx-M] >= 4) {
+                        push(stack, idx-M);
+                    }
+                    if (idx % TILE_WIDTH != 0) {
+                        state[idx-1] += 1;
+                        if (state[idx-1] >= 4) {
+                            push(stack, idx-1);
+                        }
+                    } else {
+                        if (xx > 0) {
+                            #pragma omp atomic update
+                            messages[IDX3(xx - 1, RIGHT, idx / M - 1, 2, N)] += 1;
+                        }
+                    }
+                    if ((idx + 1) % TILE_WIDTH != 0) {
+                        state[idx+1] += 1;
+                        if (state[idx+1] >= 4) {
+                            push(stack, idx+1);
+                        }
+                    } else {
+                        if (xx < (M / TILE_WIDTH) - 1) {
+                            #pragma omp atomic update
+                            messages[IDX3(xx + 1, LEFT, idx / M - 1, 2, N)] += 1;
+                        }
+                    }
+                }
+            }
+
+            #pragma omp atomic update
+            spills += localSpills;
+
+            #pragma omp atomic update
+            checks += localChecks;
+        }
+
+        totalSpills += spills;
+    } while (spills > 0);
+
+    for (int xx = 1; xx < N / TILE_WIDTH - 1; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < N; i++) {
+                assert(messages[IDX3(xx, dir, i, 2, N)] == 0);
+            }
+        }
+    }
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < M; x++) {
+            assert(state[IDX(1+y, x, M)] < 4);
+        }
+    }
+
+    clock_t end_c = clock();
+    double time_s = (double)(end_c - start_c) / CLOCKS_PER_SEC;
+
+    fprintf(stderr, "Sparse: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s: %'lf\n",
+            totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
+    for (int i = 0; i < M/TILE_WIDTH; i++) {
+        free_stack(stacks[i]);
+    }
+    free(messages);
+}
+
 static void
-stabilize_small(int N,
+stabilize_dense(int N,
                 int M,
                 char* state,
                 int render) // state is buffered only abovev and below
 {
+    long checks = 0;
     long tileSpills = 0;
     long threadSpills = 0;
     long spills = 0;
     long totalSpills = 0;
     char* messages = calloc(N/TILE_WIDTH * 2 * N, sizeof(char));
+    clock_t start_c = clock();
 
     do {
         spills = 0;
+        clock_t frame_start_c = clock();
 
         #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
         for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
@@ -376,73 +578,91 @@ stabilize_small(int N,
             }
 
             for (int yy = 0; yy < 2*N / TILE_HEIGHT - 1; yy++) {
-                do {
-                    tileSpills = 0;
-                    __m256i vspills = _mm256_set1_epi8(0);
-                    int ystart = (yy * TILE_HEIGHT) / 2;
-                    int yend = ystart + TILE_HEIGHT;
-                    for (int y = ystart; y < yend; y++) {
-                        int xspills = 0;
-                        int xstart = (xx * TILE_WIDTH);
-                        int xend = xstart + TILE_WIDTH;
+                tileSpills = 0;
+                __m256i vspills = _mm256_set1_epi8(0);
+                int ystart = (yy * TILE_HEIGHT) / 2;
+                int yend = ystart + TILE_HEIGHT;
+                for (int y = ystart; y < yend; y++) {
+                    int xspills = 0;
+                    int xstart = (xx * TILE_WIDTH);
+                    int xend = xstart + TILE_WIDTH;
 
-                        for (int x = xstart; x < xend; x += 32) {
-                            __m256i vv = _mm256_load_si256((void *)&state[IDX(1+y, x, M)]);
-                            __m256i vvabove = _mm256_load_si256((void *)&state[IDX(y, x, M)]);
-                            __m256i vvbelow = _mm256_load_si256((void *)&state[IDX(2+y, x, M)]);
-                            __m256i vpos = _mm256_cmpgt_epi8(vv, _mm256_set1_epi8(0));
-                            __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
-                            vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
-                            vinc = _mm256_and_si256(vinc, vpos);
+                    for (int x = xstart; x < xend; x += 32) {
+                        __m256i vv = _mm256_load_si256((void *)&state[IDX(1+y, x, M)]);
+                        __m256i vvabove = _mm256_load_si256((void *)&state[IDX(y, x, M)]);
+                        __m256i vvbelow = _mm256_load_si256((void *)&state[IDX(2+y, x, M)]);
+                        __m256i vpos = _mm256_cmpgt_epi8(vv, _mm256_set1_epi8(0));
+                        __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
+                        vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
+                        vinc = _mm256_and_si256(vinc, vpos);
 
-                            vspills = _mm256_add_epi8(vinc, vspills);
+                        vspills = _mm256_add_epi8(vinc, vspills);
 
-                            _mm256_store_si256((void *)&state[IDX(y, x, M)], _mm256_add_epi8(vvabove, vinc));
-                            _mm256_store_si256((void *)&state[IDX(2+y, x, M)], _mm256_add_epi8(vvbelow, vinc));
+                        _mm256_store_si256((void *)&state[IDX(y, x, M)], _mm256_add_epi8(vvabove, vinc));
+                        _mm256_store_si256((void *)&state[IDX(2+y, x, M)], _mm256_add_epi8(vvbelow, vinc));
 
-                            __m256i vinc_left = m256_srl8_1(vinc);
-                            __m256i vinc_right = m256_sll8_1(vinc);
+                        __m256i vinc_left = m256_srl8_1(vinc);
+                        __m256i vinc_right = m256_sll8_1(vinc);
 
-                            __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
-                            __m256i vv_new = _mm256_add_epi8(vinc_left,
-                                    _mm256_add_epi8(vinc_right,
-                                    _mm256_sub_epi8(vv, vinc4)));
-                            _mm256_store_si256((void *)&state[IDX(1+y, x, M)], vv_new);
+                        __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
+                        __m256i vv_new = _mm256_add_epi8(vinc_left,
+                                _mm256_add_epi8(vinc_right,
+                                _mm256_sub_epi8(vv, vinc4)));
+                        _mm256_store_si256((void *)&state[IDX(1+y, x, M)], vv_new);
 
-                            // tails
-                            if (x > xstart) {
-                                int left_spill = _mm256_extract_epi8(vinc, 0);
-                                state[IDX(1+y, x - 1, M)] += left_spill;
-                            } else if (xx > 0) {
-                                int left_spill = _mm256_extract_epi8(vinc, 0);
+                        // tails
+                        if (x > xstart) {
+                            int left_spill = _mm256_extract_epi8(vinc, 0);
+                            state[IDX(1+y, x - 1, M)] += left_spill;
+                        } else if (xx > 0) {
+                            int left_spill = _mm256_extract_epi8(vinc, 0);
 
-                                #pragma omp atomic update
-                                messages[IDX3(xx - 1, RIGHT, y, 2, N)] += left_spill;
-                            }
-                            if (x < xend - 32) {
-                                int right_spill = _mm256_extract_epi8(vinc, 31);
-                                state[IDX(1+y, x+32, M)] += right_spill;
-                            } else if (xx < N / TILE_WIDTH - 1) {
-                                int right_spill = _mm256_extract_epi8(vinc, 31);
+                            #pragma omp atomic update
+                            messages[IDX3(xx - 1, RIGHT, y, 2, N)] += left_spill;
+                        }
+                        if (x < xend - 32) {
+                            int right_spill = _mm256_extract_epi8(vinc, 31);
+                            state[IDX(1+y, x+32, M)] += right_spill;
+                        } else if (xx < N / TILE_WIDTH - 1) {
+                            int right_spill = _mm256_extract_epi8(vinc, 31);
 
-                                #pragma omp atomic update
-                                messages[IDX3(xx + 1, LEFT, y, 2, N)] += right_spill;
-                            }
+                            #pragma omp atomic update
+                            messages[IDX3(xx + 1, LEFT, y, 2, N)] += right_spill;
                         }
                     }
-                    tileSpills = m256_hadd_all(vspills);
-                    threadSpills += tileSpills;
-                } while (tileSpills > TILE_HEIGHT * TILE_WIDTH / 2);
+                }
+                tileSpills = m256_hadd_all(vspills);
+                threadSpills += tileSpills;
             }
 
             #pragma omp atomic update
             spills += threadSpills;
         }
 
-        assert(spills >= 0);
         totalSpills += spills;
+        checks += N * M;
         if (render) {
             render_i(N+2, state);
+        }
+
+        double current_efficiency = ((double) spills) / (N * M);
+        if (current_efficiency < SPARSE_THRESHOLD) { // TODO: tune this const
+            clock_t end_c = clock();
+            double time_s = (double)(end_c - start_c) / CLOCKS_PER_SEC;
+            double frame_time_s = (double)(end_c - frame_start_c) / CLOCKS_PER_SEC;
+            fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n", 
+                    current_efficiency, spills / frame_time_s);
+            fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
+                    totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
+            for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
+                for (int y = 0; y < N; y++) {
+                    state[IDX(1+y, xx * TILE_WIDTH, M)] += messages[IDX3(xx, LEFT, y, 2, N)];;
+                    state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += messages[IDX3(xx, RIGHT, y, 2, N)];
+                }
+            }
+            stabilize_sparse(N, M, state, render);
+            free(messages);
+            return;
         }
     } while (spills > 0);
 
@@ -459,9 +679,14 @@ stabilize_small(int N,
         }
     }
 
+    clock_t end_c = clock();
+    double time_s = (double)(end_c - start_c) / CLOCKS_PER_SEC;
+
     // 8 915 347 868
     // 3 251 067 552
-    fprintf(stderr, "Total Spills: %'ld\n", totalSpills);
+    fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
+            totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
+    free(messages);
 }
 
 
@@ -624,11 +849,15 @@ void sandpile2f(int n_sand, int m_sand, int n_fine, int m_fine, char* coarse, do
             double dx = x - x0;
             double dy = y - y0;
 
+            // force nearest neighbour interpolation
+            // dx = round(dx);
+            // dy = round(dy);
+
             // Bilinear interpolation
             fine[IDX(i, j, m_fine)] =
                 (1 - dx) * (1 - dy) * coarse[IDX(1+y0, x0, m_sand)] +
-                dx * (1 - dy) * coarse[IDX(1+y1, x0, m_sand)] +
-                (1 - dx) * dy * coarse[IDX(1+y0, x1, m_sand)] +
+                dx * (1 - dy) * coarse[IDX(1+y0, x1, m_sand)] +
+                (1 - dx) * dy * coarse[IDX(1+y1, x0, m_sand)] +
                 dx * dy * coarse[IDX(1+y1, x1, m_sand)];
         }
     }
@@ -700,7 +929,7 @@ void vcycle(int n, int m, double *u, double *f, int depth) {
     double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
     double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
 
-    gauss_seidel(n, m, u, f, 2);
+    gauss_seidel(n, m, u, f, 5);
     residual(n, m, u, f, res);
 
     inject(n, m, res, coarse_f);
@@ -719,7 +948,7 @@ void vcycle(int n, int m, double *u, double *f, int depth) {
         }
     }
 
-    gauss_seidel(n, m, u, f, 2);
+    gauss_seidel(n, m, u, f, 5);
 
     free(res);
     free(u_correction);
@@ -750,6 +979,7 @@ void fmg(int n, int m, double *u, double *f, int depth) {
     fmg(n_coarse, m_coarse, coarse_u, coarse_f, depth+1);
     interpolate(n_coarse, m_coarse, n, m, coarse_u, u);
 
+    vcycle(n, m, u, f, 0);
     vcycle(n, m, u, f, 0);
     vcycle(n, m, u, f, 0);
 
@@ -788,11 +1018,11 @@ poisson_identity_helper(int n, int m,
     for (int i = 1; i < n-1; i++) {
         for (int j = 0; j < m; j++) {
             int chips = (int) (
-                -4 * floor(u[IDX(i, j+1, m+2)])
-                +    floor(u[IDX(i+1, j+1, m+2)])
-                +    floor(u[IDX(i, j+2, m+2)])
-                +    floor(u[IDX(i-1, j+1, m+2)])
-                +    floor(u[IDX(i, j+0, m+2)])
+                -4 * round(u[IDX(i, j+1, m+2)])
+                +    round(u[IDX(i+1, j+1, m+2)])
+                +    round(u[IDX(i, j+2, m+2)])
+                +    round(u[IDX(i-1, j+1, m+2)])
+                +    round(u[IDX(i, j+0, m+2)])
             );
             assert(chips >= -8);
             assert(chips < 12);
@@ -801,7 +1031,7 @@ poisson_identity_helper(int n, int m,
     }
 
     // render_i(n, identity);
-    stabilize_small(n-2, m, identity, 0);
+    stabilize_dense(n-2, m, identity, 0);
     // render_i(n, identity);
 
     int converged = 0;
@@ -825,7 +1055,7 @@ poisson_identity_helper(int n, int m,
             identity[IDX(y, m-1, m)] += step_size;
         }
 
-        stabilize_small(n-2, m, identity, 0);
+        stabilize_dense(n-2, m, identity, 0);
         // render_i(n, identity);
         burns++;
 
@@ -882,17 +1112,17 @@ poisson_identity(int n, int m) {
             direct_grid[IDX(i, j, ms[0])] = 6;
         }
     }
-    stabilize_small(ns[0]-2, ms[0], direct_grid, 0);
+    stabilize_dense(ns[0]-2, ms[0], direct_grid, 0);
     for (int i = 1; i < ns[0]-1; i++) {
         for (int j = 0; j < ms[0]; j++) {
             direct_grid[IDX(i, j, ms[0])] = 6 - direct_grid[IDX(i, j, ms[0])];
         }
     }
-    stabilize_small(ns[0]-2, ms[0], direct_grid, 0);
+    stabilize_dense(ns[0]-2, ms[0], direct_grid, 0);
 
     // Iterate upto the largest grid
     for (int i = 1; i < grid_count; i++) {
-        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1.01, 20);
+        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1, 20);
     }
 
     // Party!!!
@@ -914,6 +1144,24 @@ int
 main(void)
 {
     setlocale(LC_ALL, "");
-    omp_set_num_threads(8);
-    poisson_identity(2048, 2048);
+    omp_set_num_threads(1);
+    // poisson_identity(512, 512);
+
+    int N = 258;
+    int M = 256;
+    char* direct_grid = malloc(N * M * sizeof(char));
+    for (int i = 1; i < N-1; i++) {
+        for (int j = 0; j < M; j++) {
+            direct_grid[IDX(i, j, M)] = 6;
+        }
+    }
+    stabilize_dense(N-2, M, direct_grid, 0);
+    for (int i = 1; i < N-1; i++) {
+        for (int j = 0; j < M; j++) {
+            direct_grid[IDX(i, j, M)] = 6 - direct_grid[IDX(i, j,  M)];
+        }
+    }
+    stabilize_dense(N-2, M, direct_grid, 0);
+    render_i(N, direct_grid);
+    free(direct_grid);
 }
