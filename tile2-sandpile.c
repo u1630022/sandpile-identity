@@ -20,11 +20,10 @@
 #include <locale.h>
 #include <math.h>
 #include <stdio.h>
-#include <time.h>
 #include <omp.h>
 
 #ifndef SCALE
-#  define SCALE 8
+#  define SCALE 1
 #endif
 
 #define TILE_WIDTH 64
@@ -32,6 +31,8 @@
 
 #define LEFT  0
 #define RIGHT 1
+
+#define STACK_SIZE 512
 
 /* Color palette */
 #define C0 0x111111
@@ -43,7 +44,8 @@
 
 static const int DIRECT_SOLVE_SIZE = 64;
 static const long ALIGNMENT = 64;
-static const double SPARSE_THRESHOLD = 0.05;
+static const double SPARSE_THRESHOLD = 0.03;
+
 int IDX(int i, int j, int n) { return i * n + j; }
 
 // Inferno palette
@@ -218,68 +220,46 @@ render_i(int N, char* grid)
 }
 
 typedef struct {
-    int* data;       // Pointer to the stack data
-    int capacity;    // Current capacity of the stack
-    int top;         // Index of the top element
+    int top;
+    int size;
+    int data[STACK_SIZE];
 } IntStack;
 
-// Initialize a new stack
-IntStack* create_stack(int initial_capacity) {
-    IntStack* stack = (IntStack*)malloc(sizeof(IntStack));
+IntStack* create_stack() {
+    IntStack* stack = (IntStack*)aligned_alloc(ALIGNMENT, sizeof(IntStack));
     if (!stack) {
         perror("Failed to allocate memory for stack");
         exit(EXIT_FAILURE);
     }
-    stack->data = (int*)malloc(initial_capacity * sizeof(int));
-    if (!stack->data) {
-        perror("Failed to allocate memory for stack data");
-        free(stack);
-        exit(EXIT_FAILURE);
-    }
-    stack->capacity = initial_capacity;
-    stack->top = -1; // Stack is initially empty
+    stack->size = 0;
+    stack->top = 0;
     return stack;
 }
 
-// Double the capacity of the stack
-void expand_stack(IntStack* stack) {
-    int new_capacity = stack->capacity * 2;
-    int* new_data = (int*)realloc(stack->data, new_capacity * sizeof(int));
-    if (!new_data) {
-        perror("Failed to expand stack");
-        exit(EXIT_FAILURE);
-    }
-    stack->data = new_data;
-    stack->capacity = new_capacity;
-}
-
-// Push an integer onto the stack
 void push(IntStack* stack, int value) {
-    // assert(value < 65 * 64);
-    // assert(value >= 64);
-    if (stack->top == stack->capacity - 1) {
-        expand_stack(stack);
+    stack->top = (stack->top + 1) % STACK_SIZE;
+    stack->data[stack->top] = value;
+    if (stack->size < STACK_SIZE) {
+        stack->size++;
     }
-    stack->data[++stack->top] = value;
 }
 
-// Pop an integer from the stack
 int pop(IntStack* stack) {
-    if (stack->top == -1) {
+    if (stack->size == 0) {
         fprintf(stderr, "Stack underflow\n");
         exit(EXIT_FAILURE);
     }
-    return stack->data[stack->top--];
+    int val = stack->data[stack->top];
+    stack->top = (stack->top + STACK_SIZE - 1) % STACK_SIZE;
+    stack->size--;
+    return val;
 }
 
-// Check if the stack is empty
 int is_empty(IntStack* stack) {
-    return stack->top == -1;
+    return stack->size == 0;
 }
 
-// Free the stack memory
 void free_stack(IntStack* stack) {
-    free(stack->data);
     free(stack);
 }
 
@@ -415,16 +395,17 @@ stabilize_sparse(int N,
     long checks = 0;
     long totalSpills = 0;
     char* messages = calloc(M/TILE_WIDTH * 2 * N, sizeof(char));
-    clock_t start_c = clock();
+    double start_c = omp_get_wtime();
 
     // TODO: should be made private
     IntStack* stacks[M/TILE_WIDTH];
     for (int i = 0; i < M/TILE_WIDTH; i++) {
-        stacks[i] = create_stack(10);
+        stacks[i] = create_stack();
     }
 
     do {
         spills = 0;
+        int first_iter = 1;
 
         #pragma omp parallel for schedule(static, 1)
         for (int xx = 0; xx < M / TILE_WIDTH; xx++) {
@@ -444,6 +425,9 @@ stabilize_sparse(int N,
                     messages[IDX3(xx, LEFT, y, 2, N)] = 0;
                 }
                 state[IDX(1+y, xx * TILE_WIDTH, M)] += tmp;
+                if (state[IDX(1+y, xx * TILE_WIDTH, M)] >= 4) {
+                    push(stack, IDX(1+y, xx * TILE_WIDTH, M));
+                }
 
                 #pragma omp atomic capture
                 {
@@ -451,13 +435,22 @@ stabilize_sparse(int N,
                     messages[IDX3(xx, RIGHT, y, 2, N)] = 0;
                 }
                 state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += tmp;
+                if (state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] >= 4) {
+                    push(stack, IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M));
+                }
             }
 
-            for (int y = 0; y < N; y++) {
-                for (int x = xend - 1; x >= xstart; x--) {
-                    if (state[IDX(1+y, x, M)] >= 4) {
-                        push(stack, IDX(1+y, x, M));
+            if (stack->size < 128) {
+                for (int y = 0; y < N; y++) {
+                    for (int x = xend - 1; x >= xstart; x--) {
                         localChecks++;
+                        if (state[IDX(1+y, x, M)] >= 4) {
+                            push(stack, IDX(1+y, x, M));
+                            break;
+                        }
+                    }
+                    if (stack->size >= 128) {
+                        break;
                     }
                 }
             }
@@ -468,13 +461,13 @@ stabilize_sparse(int N,
                 if (state[idx] >= 4) {
                     localSpills++;
                     state[idx] -= 4;
-                    state[idx+M] += 1;
-                    if ((idx/M < N) && state[idx+M] >= 4) {
-                        push(stack, idx+M);
-                    }
                     state[idx-M] += 1;
                     if ((idx > 2*M) && state[idx-M] >= 4) {
                         push(stack, idx-M);
+                    }
+                    state[idx+M] += 1;
+                    if ((idx/M < N) && state[idx+M] >= 4) {
+                        push(stack, idx+M);
                     }
                     if (idx % TILE_WIDTH != 0) {
                         state[idx-1] += 1;
@@ -524,8 +517,8 @@ stabilize_sparse(int N,
         }
     }
 
-    clock_t end_c = clock();
-    double time_s = (double)(end_c - start_c) / CLOCKS_PER_SEC;
+    double end_c = omp_get_wtime();
+    double time_s = end_c - start_c;
 
     fprintf(stderr, "Sparse: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s: %'lf\n",
             totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
@@ -547,11 +540,11 @@ stabilize_dense(int N,
     long spills = 0;
     long totalSpills = 0;
     char* messages = calloc(N/TILE_WIDTH * 2 * N, sizeof(char));
-    clock_t start_c = clock();
+    double start_c = omp_get_wtime();
 
     do {
         spills = 0;
-        clock_t frame_start_c = clock();
+        double frame_start_c = omp_get_wtime();
 
         #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
         for (int xx = 0; xx < N / TILE_WIDTH; xx++) {
@@ -647,9 +640,9 @@ stabilize_dense(int N,
 
         double current_efficiency = ((double) spills) / (N * M);
         if (current_efficiency < SPARSE_THRESHOLD) { // TODO: tune this const
-            clock_t end_c = clock();
-            double time_s = (double)(end_c - start_c) / CLOCKS_PER_SEC;
-            double frame_time_s = (double)(end_c - frame_start_c) / CLOCKS_PER_SEC;
+            double end_c = omp_get_wtime();
+            double time_s = end_c - start_c;
+            double frame_time_s = end_c - frame_start_c;
             fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n", 
                     current_efficiency, spills / frame_time_s);
             fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
@@ -679,8 +672,8 @@ stabilize_dense(int N,
         }
     }
 
-    clock_t end_c = clock();
-    double time_s = (double)(end_c - start_c) / CLOCKS_PER_SEC;
+    double end_c = omp_get_wtime();
+    double time_s = end_c - start_c;
 
     // 8 915 347 868
     // 3 251 067 552
@@ -1122,7 +1115,7 @@ poisson_identity(int n, int m) {
 
     // Iterate upto the largest grid
     for (int i = 1; i < grid_count; i++) {
-        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1, 20);
+        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1.001, 40);
     }
 
     // Party!!!
@@ -1144,24 +1137,6 @@ int
 main(void)
 {
     setlocale(LC_ALL, "");
-    omp_set_num_threads(1);
-    // poisson_identity(512, 512);
-
-    int N = 258;
-    int M = 256;
-    char* direct_grid = malloc(N * M * sizeof(char));
-    for (int i = 1; i < N-1; i++) {
-        for (int j = 0; j < M; j++) {
-            direct_grid[IDX(i, j, M)] = 6;
-        }
-    }
-    stabilize_dense(N-2, M, direct_grid, 0);
-    for (int i = 1; i < N-1; i++) {
-        for (int j = 0; j < M; j++) {
-            direct_grid[IDX(i, j, M)] = 6 - direct_grid[IDX(i, j,  M)];
-        }
-    }
-    stabilize_dense(N-2, M, direct_grid, 0);
-    render_i(N, direct_grid);
-    free(direct_grid);
+    omp_set_num_threads(8);
+    poisson_identity(8192, 8192);
 }
