@@ -45,6 +45,7 @@
 static const int DIRECT_SOLVE_SIZE = 64;
 static const long ALIGNMENT = 64;
 static const double SPARSE_THRESHOLD = 0.03;
+static const double FMG_CONVERGENCE_LIMIT = 0.0001;
 
 int IDX(int i, int j, int n) { return i * n + j; }
 
@@ -350,6 +351,55 @@ m256_hadd_all(__m256i i) {
     return sum;
 }
 
+// buffered in n and m
+void
+enforce_symmetry(int n, int m, double* grid)
+{
+    assert(n % 2 == 0);
+    assert(m % 2 == 0);
+    for (int i = 1; i < n / 2; i++) {
+        for (int j = 1; j < m / 2; j++) {
+            double v = grid[IDX(i, j, m)];
+            grid[IDX(i, m - j - 1, m)] = v;
+            grid[IDX(n - i - 1, j, m)] = v;
+            grid[IDX(n - i - 1, m - j - 1, m)] = v;
+        }
+    }
+}
+
+// buffered only in n
+void
+enforce_symmetry_i(int n, int m, char* grid)
+{
+    assert(n % 2 == 0);
+    assert(m % 2 == 0);
+    for (int i = 1; i < n / 2; i++) {
+        for (int j = 0; j < m / 2; j++) {
+            char v = grid[IDX(i, j, m)];
+            grid[IDX(i, m - j - 1, m)] = v;
+            grid[IDX(n - i - 1, j, m)] = v;
+            grid[IDX(n - i - 1, m - j - 1, m)] = v;
+        }
+    }
+}
+
+// buffered only in n
+void
+assert_symmetry(int n, int m, char* grid)
+{
+    assert(n % 2 == 0);
+    assert(m % 2 == 0);
+    for (int i = 1; i < n / 2; i++) {
+        for (int j = 0; j < m / 2; j++) {
+            double v = grid[IDX(i, j, m)];
+            assert(grid[IDX(i, m - j - 1, m)] == v);
+            assert(grid[IDX(n - i - 1, j, m)] == v);
+            assert(grid[IDX(n - i - 1, m - j - 1, m)] == v);
+        }
+    }
+}
+
+
 // Assume surrounded by buffer
 void
 stabilize_generic(int N,
@@ -528,6 +578,165 @@ stabilize_sparse(int N,
     free(messages);
 }
 
+void
+stabilize_sparse_topleft(int N,
+                         int M,
+                         char* state,
+                         int render)
+{
+    assert(N % 2 == 0);
+    assert(M % 2 == 0);
+    int TL_N = N / 2;
+    int TL_M = M / 2;
+
+    long spills = 0;
+    long checks = 0;
+    long totalSpills = 0;
+    char* messages = calloc(TL_M/TILE_WIDTH * 2 * TL_N, sizeof(char));
+    double start_c = omp_get_wtime();
+
+    IntStack* stacks[TL_M/TILE_WIDTH];
+    for (int i = 0; i < TL_M/TILE_WIDTH; i++) {
+        stacks[i] = create_stack();
+    }
+
+    do {
+        spills = 0;
+        int first_iter = 1;
+
+        #pragma omp parallel for schedule(static, 1)
+        for (int xx = 0; xx < TL_M / TILE_WIDTH; xx++) {
+            int xstart = (xx * TILE_WIDTH);
+            int xend = xstart + TILE_WIDTH;
+            long localSpills = 0;
+            long localChecks = 0;
+            IntStack* stack = stacks[xx];
+
+            // import from messages
+            for (int y = 0; y < TL_N; y++) {
+                int tmp = 0;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, LEFT, y, 2, TL_N)];
+                    messages[IDX3(xx, LEFT, y, 2, TL_N)] = 0;
+                }
+                state[IDX(1+y, xx * TILE_WIDTH, M)] += tmp;
+                if (state[IDX(1+y, xx * TILE_WIDTH, M)] >= 4) {
+                    push(stack, IDX(1+y, xx * TILE_WIDTH, M));
+                }
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, RIGHT, y, 2, TL_N)];
+                    messages[IDX3(xx, RIGHT, y, 2, TL_N)] = 0;
+                }
+                state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += tmp;
+                if (state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] >= 4) {
+                    push(stack, IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M));
+                }
+            }
+
+            if (stack->size < 128) {
+                for (int y = 0; y < TL_N; y++) {
+                    for (int x = xend - 1; x >= xstart; x--) {
+                        localChecks++;
+                        if (state[IDX(1+y, x, M)] >= 4) {
+                            push(stack, IDX(1+y, x, M));
+                            break;
+                        }
+                    }
+                    if (stack->size >= 128) {
+                        break;
+                    }
+                }
+            }
+
+            while (!is_empty(stack)) {
+                int idx = pop(stack);
+                localChecks++;
+                if (state[idx] >= 4) {
+                    char s = state[idx] / 4;
+                    localSpills += s;
+                    state[idx] -= 4 * s;
+                    state[idx-M] += s;
+                    if ((idx > 2*M) && state[idx-M] >= 4) {
+                        push(stack, idx-M);
+                    }
+                    if (idx/M < TL_N) { // Not on bottom edge
+                        state[idx+M] += s;
+                        if (state[idx+M] >= 4) {
+                            push(stack, idx+M);
+                        }
+                    } else {
+                        state[idx] += s;
+                    }
+                    if (idx % TILE_WIDTH != 0) {
+                        state[idx-1] += s;
+                        if (state[idx-1] >= 4) {
+                            push(stack, idx-1);
+                        }
+                    } else {
+                        if (xx > 0) {
+                            #pragma omp atomic update
+                            messages[IDX3(xx - 1, RIGHT, idx / M - 1, 2, TL_N)] += s;
+                        }
+                    }
+                    if ((idx + 1) % TILE_WIDTH != 0) {
+                        state[idx+1] += s;
+                        if (state[idx+1] >= 4) {
+                            push(stack, idx+1);
+                        }
+                    } else {
+                        if (xx < (TL_M / TILE_WIDTH) - 1) {
+                            #pragma omp atomic update
+                            messages[IDX3(xx + 1, LEFT, idx / M - 1, 2, TL_N)] += s;
+                        } else {
+                            state[idx] += s;
+                        }
+                    }
+                }
+            }
+
+            #pragma omp atomic update
+            spills += localSpills;
+
+            #pragma omp atomic update
+            checks += localChecks;
+        }
+
+        if (render) {
+            render_i(N+2, state);
+        }
+        totalSpills += spills;
+    } while (spills > 0);
+
+    for (int xx = 1; xx < TL_N / TILE_WIDTH - 1; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < TL_N; i++) {
+                assert(messages[IDX3(xx, dir, i, 2, TL_N)] == 0);
+            }
+        }
+    }
+
+    enforce_symmetry_i(N+2, M, state);
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < M; x++) {
+            assert(state[IDX(1+y, x, M)] < 4);
+        }
+    }
+
+    double end_c = omp_get_wtime();
+    double time_s = end_c - start_c;
+
+    fprintf(stderr, "Sparse: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s: %'lf\n",
+            totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
+    for (int i = 0; i < TL_M/TILE_WIDTH; i++) {
+        free_stack(stacks[i]);
+    }
+    free(messages);
+}
+
 static void
 stabilize_dense(int N,
                 int M,
@@ -682,6 +891,179 @@ stabilize_dense(int N,
     free(messages);
 }
 
+static void
+stabilize_dense_topleft(int N,
+                        int M,
+                        char* state,
+                        int render) // state is buffered only abovev and below
+{
+    assert(N % 2 == 0);
+    assert(M % 2 == 0);
+    int TL_N = N / 2;
+    int TL_M = M / 2;
+    assert(TL_M >= TILE_WIDTH);
+
+    long checks = 0;
+    long tileSpills = 0;
+    long threadSpills = 0;
+    long spills = 0;
+    long totalSpills = 0;
+    char* messages = calloc(TL_M/TILE_WIDTH * 2 * TL_N, sizeof(char));
+    double start_c = omp_get_wtime();
+
+    do {
+        spills = 0;
+        double frame_start_c = omp_get_wtime();
+
+        #pragma omp parallel for private(tileSpills, threadSpills) schedule(static, 1)
+        for (int xx = 0; xx < TL_N / TILE_WIDTH; xx++) {
+
+            threadSpills = 0;
+
+            // import from messages
+            for (int y = 0; y < TL_N; y++) {
+                int tmp = 0;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, LEFT, y, 2, TL_N)];
+                    messages[IDX3(xx, LEFT, y, 2, TL_N)] = 0;
+                }
+                state[IDX(1+y, xx * TILE_WIDTH, M)] += tmp;
+
+                #pragma omp atomic capture
+                {
+                    tmp = messages[IDX3(xx, RIGHT, y, 2, TL_N)];
+                    messages[IDX3(xx, RIGHT, y, 2, TL_N)] = 0;
+                }
+                state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += tmp;
+            }
+
+            for (int yy = 0; yy < 2*TL_N / TILE_HEIGHT - 1; yy++) {
+                tileSpills = 0;
+                __m256i vspills = _mm256_set1_epi8(0);
+                int ystart = (yy * TILE_HEIGHT) / 2;
+                int yend = ystart + TILE_HEIGHT;
+                for (int y = ystart; y < yend; y++) {
+                    int xspills = 0;
+                    int xstart = (xx * TILE_WIDTH);
+                    int xend = xstart + TILE_WIDTH;
+                    int isBottomRow = y == TL_N - 1;
+
+                    for (int x = xstart; x < xend; x += 32) {
+                        __m256i vv = _mm256_load_si256((void *)&state[IDX(1+y, x, M)]);
+                        __m256i vvabove = _mm256_load_si256((void *)&state[IDX(y, x, M)]);
+                        __m256i vpos = _mm256_cmpgt_epi8(vv, _mm256_set1_epi8(0));
+                        __m256i vinc = _mm256_srl_epi16(vv, _mm_set1_epi64x(2));
+                        vinc = _mm256_and_si256(vinc, _mm256_set1_epi8(0x3F));
+                        vinc = _mm256_and_si256(vinc, vpos);
+
+                        vspills = _mm256_add_epi8(vinc, vspills);
+
+                        _mm256_store_si256((void *)&state[IDX(y, x, M)], _mm256_add_epi8(vvabove, vinc));
+                        if (!isBottomRow) {
+                            __m256i vvbelow = _mm256_load_si256((void *)&state[IDX(2+y, x, M)]);
+                            _mm256_store_si256((void *)&state[IDX(2+y, x, M)], _mm256_add_epi8(vvbelow, vinc));
+                        }
+
+                        __m256i vinc_left = m256_srl8_1(vinc);
+                        __m256i vinc_right = m256_sll8_1(vinc);
+
+                        __m256i vv_new;
+                        if (isBottomRow) {
+                            __m256i vinc3 = _mm256_sub_epi8(_mm256_sll_epi16(vinc, _mm_set1_epi64x(2)), vinc);
+                            vv_new = _mm256_add_epi8(vinc_left,
+                                    _mm256_add_epi8(vinc_right,
+                                    _mm256_sub_epi8(vv, vinc3)));
+                        } else {
+                            __m256i vinc4 = _mm256_sll_epi16(vinc, _mm_set1_epi64x(2));
+                            vv_new = _mm256_add_epi8(vinc_left,
+                                    _mm256_add_epi8(vinc_right,
+                                    _mm256_sub_epi8(vv, vinc4)));
+                        }
+                        _mm256_store_si256((void *)&state[IDX(1+y, x, M)], vv_new);
+
+                        // tails
+                        if (x > xstart) {
+                            char left_spill = _mm256_extract_epi8(vinc, 0);
+                            state[IDX(1+y, x - 1, M)] += left_spill;
+                        } else if (xx > 0) {
+                            char left_spill = _mm256_extract_epi8(vinc, 0);
+
+                            #pragma omp atomic update
+                            messages[IDX3(xx - 1, RIGHT, y, 2, TL_N)] += left_spill;
+                        }
+
+                        char right_spill = _mm256_extract_epi8(vinc, 31);
+                        if (x < xend - 32) { // Not at end of tile
+                            state[IDX(1+y, x+32, M)] += right_spill;
+                        } else if (xx < TL_N / TILE_WIDTH - 1) { // End of tile but not final tile
+                            #pragma omp atomic update
+                            messages[IDX3(xx + 1, LEFT, y, 2, TL_N)] += right_spill;
+                        } else { // End of final tile
+                            state[IDX(1+y, x + 31, M)] += right_spill;
+                        }
+                    }
+                }
+                tileSpills = m256_hadd_all(vspills);
+                threadSpills += tileSpills;
+            }
+
+            #pragma omp atomic update
+            spills += threadSpills;
+        }
+
+        totalSpills += spills;
+        checks += TL_N * TL_M;
+        if (render) {
+            render_i(N+2, state);
+        }
+
+        double current_efficiency = ((double) spills) / (TL_N * TL_M);
+        if (current_efficiency < SPARSE_THRESHOLD) {
+            double end_c = omp_get_wtime();
+            double time_s = end_c - start_c;
+            double frame_time_s = end_c - frame_start_c;
+            fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n", 
+                    current_efficiency, spills / frame_time_s);
+            fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
+                    totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
+            for (int xx = 0; xx < TL_M / TILE_WIDTH; xx++) {
+                for (int y = 0; y < TL_N; y++) {
+                    state[IDX(1+y, xx * TILE_WIDTH, M)] += messages[IDX3(xx, LEFT, y, 2, TL_N)];;
+                    state[IDX(1+y, (xx + 1) * TILE_WIDTH - 1, M)] += messages[IDX3(xx, RIGHT, y, 2, TL_N)];
+                }
+            }
+            stabilize_sparse_topleft(N, M, state, render);
+            free(messages);
+            return;
+        }
+    } while (spills > 0);
+
+    for (int xx = 1; xx < TL_N / TILE_WIDTH - 1; xx++) {
+        for (int dir = LEFT; dir <= RIGHT; dir++) {
+            for (int i = 0; i < TL_N; i++) {
+                assert(messages[IDX3(xx, dir, i, 2, TL_N)] == 0);
+            }
+        }
+    }
+
+    enforce_symmetry_i(N+2, M, state);
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < M; x++) {
+            assert(state[IDX(1+y, x, M)] < 4);
+        }
+    }
+
+    double end_c = omp_get_wtime();
+    double time_s = end_c - start_c;
+
+    // 8 915 347 868
+    // 3 251 067 552
+    fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
+            totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
+    free(messages);
+}
 
 
 // We want to approximate the odometer of the identity sandpile
@@ -922,7 +1304,7 @@ void vcycle(int n, int m, double *u, double *f, int depth) {
     double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
     double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
 
-    gauss_seidel(n, m, u, f, 5);
+    gauss_seidel(n, m, u, f, 2);
     residual(n, m, u, f, res);
 
     inject(n, m, res, coarse_f);
@@ -941,7 +1323,7 @@ void vcycle(int n, int m, double *u, double *f, int depth) {
         }
     }
 
-    gauss_seidel(n, m, u, f, 5);
+    gauss_seidel(n, m, u, f, 1);
 
     free(res);
     free(u_correction);
@@ -961,6 +1343,8 @@ void fmg(int n, int m, double *u, double *f, int depth) {
     int m_coarse = (m + 1)/2;
     double *coarse_u = malloc(n_coarse * m_coarse * sizeof(double));
     double *coarse_f = malloc(n_coarse * m_coarse * sizeof(double));
+    double* res = calloc(n * (m+2), sizeof(double));
+    double norm = LONG_MAX;
 
     for (int i = 0; i < n_coarse; i++) {
         for (int j = 0; j < m_coarse; j++) {
@@ -972,14 +1356,16 @@ void fmg(int n, int m, double *u, double *f, int depth) {
     fmg(n_coarse, m_coarse, coarse_u, coarse_f, depth+1);
     interpolate(n_coarse, m_coarse, n, m, coarse_u, u);
 
-    vcycle(n, m, u, f, 0);
-    vcycle(n, m, u, f, 0);
-    vcycle(n, m, u, f, 0);
+    while (norm > FMG_CONVERGENCE_LIMIT) {
+        vcycle(n, m, u, f, 0);
+        residual(n, m, u, f, res);
+        norm = max_norm(n, m, res);
+    }
 
+    free(res);
     free(coarse_u);
     free(coarse_f);
 }
-
 
 void
 poisson_identity_helper(int n, int m,
@@ -992,7 +1378,6 @@ poisson_identity_helper(int n, int m,
     double* f = calloc(n * (m+2), sizeof(double));
     double* res = calloc(n * (m+2), sizeof(double));
     int* ident_copy = calloc(n * m, sizeof(int));
-    // TODO this just looks wrong idk?
     sandpile2f(small_n, small_m, n, m+2, small_identity, f);
     // render_d(n, m+2, f);
 
@@ -1003,6 +1388,7 @@ poisson_identity_helper(int n, int m,
     }
 
     fmg(n, m+2, u, f, 0);
+    enforce_symmetry(n, m+2, u); // require u to have 4 fold symmetry
     residual(n, m+2, u, f, res);
     fprintf(stderr, "Discrete L2 Norm: %lf \t| Max Norm: %lf\n",
             dl2_norm(n, m+2, res), max_norm(n, m+2, res));
@@ -1024,7 +1410,8 @@ poisson_identity_helper(int n, int m,
     }
 
     // render_i(n, identity);
-    stabilize_dense(n-2, m, identity, 0);
+    assert_symmetry(n, m, identity);
+    stabilize_dense_topleft(n-2, m, identity, 0);
     // render_i(n, identity);
 
     int converged = 0;
@@ -1048,7 +1435,7 @@ poisson_identity_helper(int n, int m,
             identity[IDX(y, m-1, m)] += step_size;
         }
 
-        stabilize_dense(n-2, m, identity, 0);
+        stabilize_dense_topleft(n-2, m, identity, 0);
         // render_i(n, identity);
         burns++;
 
@@ -1115,7 +1502,7 @@ poisson_identity(int n, int m) {
 
     // Iterate upto the largest grid
     for (int i = 1; i < grid_count; i++) {
-        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1.001, 40);
+        poisson_identity_helper(ns[i], ms[i], ns[i-1], ms[i-1], grids[i-1], grids[i], 1.0004, 40);
     }
 
     // Party!!!
@@ -1131,12 +1518,10 @@ poisson_identity(int n, int m) {
 
 // TODO:
 // 3. Tweak base solver so that we can solve rectangular grids
-// 4. Test recursive sandpile-poisson method
-// 5. Benchmark methods
 int
 main(void)
 {
     setlocale(LC_ALL, "");
     omp_set_num_threads(8);
-    poisson_identity(8192, 8192);
+    poisson_identity(8192, 8192); // TODO: goal hit 16384
 }
