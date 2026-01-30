@@ -852,7 +852,7 @@ stabilize_dense(int N,
             double end_c = omp_get_wtime();
             double time_s = end_c - start_c;
             double frame_time_s = end_c - frame_start_c;
-            fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n", 
+            fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n",
                     current_efficiency, spills / frame_time_s);
             fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
                     totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
@@ -1024,7 +1024,7 @@ stabilize_dense_topleft(int N,
             double end_c = omp_get_wtime();
             double time_s = end_c - start_c;
             double frame_time_s = end_c - frame_start_c;
-            fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n", 
+            fprintf(stderr, "Switching to sparse stabilizer. Efficiency: %lf |\t Frame Spills/s: %'lf\n",
                     current_efficiency, spills / frame_time_s);
             fprintf(stderr, "Dense: Total Spills: %'ld |\tChecks: %'ld |\t Efficiency: %lf |\t Spills/s %'lf\n",
                     totalSpills, checks, ((double) totalSpills) / checks, totalSpills / time_s);
@@ -1523,5 +1523,5 @@ main(void)
 {
     setlocale(LC_ALL, "");
     omp_set_num_threads(8);
-    poisson_identity(8192, 8192); // TODO: goal hit 16384
+    poisson_identity(16384, 16384); // TODO: goal hit 16384
 }
