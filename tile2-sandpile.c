@@ -227,7 +227,7 @@ typedef struct {
 } IntStack;
 
 IntStack* create_stack() {
-    IntStack* stack = (IntStack*)aligned_alloc(ALIGNMENT, sizeof(IntStack));
+    IntStack* stack = (IntStack*)malloc(sizeof(IntStack));
     if (!stack) {
         perror("Failed to allocate memory for stack");
         exit(EXIT_FAILURE);
@@ -1506,7 +1506,7 @@ poisson_identity(int n, int m) {
     }
 
     // Party!!!
-    render_i(ns[grid_count-1], grids[grid_count-1]);
+    // render_i(ns[grid_count-1], grids[grid_count-1]);
 
     free(ns);
     free(ms);
@@ -1516,6 +1516,320 @@ poisson_identity(int n, int m) {
     free(grids);
 }
 
+void
+iterated_burning(int N, int M, char step_size)
+{
+    // Grids are buffered in n
+    int n = N + 2;
+    int m = M;
+
+    char* identity = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+    char* ident_copy = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+    int converged = 0;
+    int burns = 0;
+
+    // Zeroing
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 0; j < m; j++) {
+            ident_copy[IDX(i, j, m)] = 0;
+            identity[IDX(i, j, m)] = 0;
+        }
+    }
+
+    do {
+        // copy into s_copy
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                ident_copy[IDX(i, j, m)] = identity[IDX(i, j, m)];
+            }
+        }
+
+        // Add burning config
+        for (int x = 0; x < m; x++) {
+            identity[IDX(1, x, m)] += step_size;
+            identity[IDX(n-2, x, m)] += step_size;
+        }
+        for (int y = 1; y < n-1; y++) {
+            identity[IDX(y, 0, m)]   += step_size;
+            identity[IDX(y, m-1, m)] += step_size;
+        }
+
+        if ((M / 2) % TILE_WIDTH != 0) {
+            stabilize_dense(n-2, m, identity, 0);
+        } else {
+            stabilize_dense_topleft(n-2, m, identity, 0);
+        }
+        // render_i(n, identity);
+        burns++;
+
+        // Check convergance
+        converged = 1;
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                if (ident_copy[IDX(i, j, m)] != identity[IDX(i, j, m)]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    // render_i(n, identity);
+
+    free(ident_copy);
+    free(identity);
+}
+
+void
+exponential_burning(int N, int M)
+{
+    // Grids are buffered in n
+    int n = N + 2;
+    int m = M;
+
+    char* identity = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+    char* ident_copy = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+    int converged = 0;
+    int burns = 0;
+
+    // Zeroing
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 0; j < m; j++) {
+            ident_copy[IDX(i, j, m)] = 0;
+            identity[IDX(i, j, m)] = 0;
+        }
+    }
+
+    // Add burning config
+    for (int x = 0; x < m; x++) {
+        identity[IDX(1, x, m)] += 1;
+        identity[IDX(n-2, x, m)] += 1;
+    }
+    for (int y = 1; y < n-1; y++) {
+        identity[IDX(y, 0, m)]   += 1;
+        identity[IDX(y, m-1, m)] += 1;
+    }
+
+    do {
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                identity[IDX(i, j, m)] *= 2;
+            }
+        }
+
+        if ((m / 2) % TILE_WIDTH != 0) {
+            stabilize_dense(n-2, m, identity, 0);
+        } else {
+            stabilize_dense_topleft(n-2, m, identity, 0);
+        }
+        // render_i(n, identity);
+        burns++;
+
+        // copy into s_copy
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                ident_copy[IDX(i, j, m)] = identity[IDX(i, j, m)];
+            }
+        }
+
+        // Check convergance
+        // Add burning config
+        for (int x = 0; x < m; x++) {
+            identity[IDX(1, x, m)] += 1;
+            identity[IDX(n-2, x, m)] += 1;
+        }
+        for (int y = 1; y < n-1; y++) {
+            identity[IDX(y, 0, m)]   += 1;
+            identity[IDX(y, m-1, m)] += 1;
+        }
+
+        if ((m / 2) % TILE_WIDTH != 0) {
+            stabilize_dense(n-2, m, identity, 0);
+        } else {
+            stabilize_dense_topleft(n-2, m, identity, 0);
+        }
+
+        converged = 1;
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                if (ident_copy[IDX(i, j, m)] != identity[IDX(i, j, m)]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    // render_i(n, identity);
+
+    free(ident_copy);
+    free(identity);
+}
+
+void
+difference_identity(int N, int M)
+{
+    // Grids are buffered in n
+    int n = N + 2;
+    int m = M;
+
+    char* identity = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 0; j < m; j++) {
+            identity[IDX(i, j, m)] = 6;
+        }
+    }
+
+    if ((M / 2) % TILE_WIDTH != 0) {
+        stabilize_dense(n-2, m, identity, 0);
+    } else {
+        stabilize_dense_topleft(n-2, m, identity, 0);
+    }
+
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 0; j < m; j++) {
+            identity[IDX(i, j, m)] = 6 - identity[IDX(i, j, m)];
+        }
+    }
+
+    if ((M / 2) % TILE_WIDTH != 0) {
+        stabilize_dense(n-2, m, identity, 0);
+    } else {
+        stabilize_dense_topleft(n-2, m, identity, 0);
+    }
+
+    // render_i(n, identity);
+
+    free(identity);
+}
+
+int
+is_2power(int n)
+{
+    if (n == 1) {
+        return 1;
+    }
+
+    int half = n / 2;
+    if (n != half * 2) {
+        return 0;
+    } else {
+        return is_2power(half);
+    }
+}
+
+// Equations from https://people.reed.edu/~davidp/homepage/students/fish.pdf
+double
+estimate_h(double size)
+{
+    return 0.16744 * size * size + 0.18971 * size - 2.7978;
+}
+
+double
+estimate_c(double size)
+{
+    return -0.83617 + 1.4848 * log(size);
+}
+
+double
+estimate_s(double size)
+{
+    return 0.79154 * size + 1.15881;
+}
+
+double
+poly_surface(double h, double c, double s, double x, double y)
+{
+    return h
+         + (s - h) * (x * x + y * y)
+         + (c + h - 2 * s) * (x * x * y * y);
+}
+
+int
+poly_odometer(int N, int M, int x, int y)
+{
+    // Enforce boundary conditions
+    if (x < 0 || x >= M || y < 0 || y >= N) {
+        return 0;
+    }
+    double l = (N-1) / 2.0;
+    double h;
+    double c;
+    double s;
+    int res = -round(poly_surface(h, c, s, (x - l)/l, (y - l)/l));
+}
+
+void
+surface_identity(int N, int M)
+{
+    // Grids are buffered in n
+    int n = N + 2;
+    int m = M;
+
+    char* identity = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+    char* ident_copy = aligned_alloc(ALIGNMENT, sizeof(char) * n * m);
+    int converged = 0;
+    int burns = 0;
+
+    // Zeroing
+    for (int i = 1; i < n-1; i++) {
+        for (int j = 0; j < m; j++) {
+            int chips = (int) (
+                -4 * poly_odometer(N, M, j, i)
+                +    poly_odometer(N, M, j-1, i)
+                +    poly_odometer(N, M, j, i-1)
+                +    poly_odometer(N, M, j+1, i)
+                +    poly_odometer(N, M, j, i+1)
+            );
+            assert(chips >= -8);
+            assert(chips < 12);
+            identity[IDX(i, j, m)] = (char) (chips);
+        }
+    }
+
+    do {
+        // copy into s_copy
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                ident_copy[IDX(i, j, m)] = identity[IDX(i, j, m)];
+            }
+        }
+
+        // Add burning config
+        // In C. Fish this should be k3, but we are limited to what fits comfortably in a char
+        for (int x = 0; x < m; x++) {
+            identity[IDX(1, x, m)] += 40;
+            identity[IDX(n-2, x, m)] += 40;
+        }
+        for (int y = 1; y < n-1; y++) {
+            identity[IDX(y, 0, m)]   += 40;
+            identity[IDX(y, m-1, m)] += 40;
+        }
+
+        if ((M / 2) % TILE_WIDTH != 0) {
+            stabilize_dense(n-2, m, identity, 0);
+        } else {
+            stabilize_dense_topleft(n-2, m, identity, 0);
+        }
+        // render_i(n, identity);
+        burns++;
+
+        // Check convergance
+        converged = 1;
+        for (int i = 1; i < n-1; i++) {
+            for (int j = 0; j < m; j++) {
+                if (ident_copy[IDX(i, j, m)] != identity[IDX(i, j, m)]) {
+                    converged = 0;
+                }
+            }
+        }
+    } while (!converged);
+
+    // render_i(n, identity);
+
+    free(ident_copy);
+    free(identity);
+}
+
 // TODO:
 // 3. Tweak base solver so that we can solve rectangular grids
 int
@@ -1523,5 +1837,49 @@ main(void)
 {
     setlocale(LC_ALL, "");
     omp_set_num_threads(8);
-    poisson_identity(16384, 16384); // TODO: goal hit 16384
+
+    int reps = 3;
+    double duration = 0;
+    double avg_duration = 0;
+    double start_time = 0;
+    double end_time = 0;
+
+    printf("size, surface_method\n");
+    for (int size = 64; size <= 512 + 128; size += 64) {
+        printf("%d, ", size);
+
+        avg_duration = 0;
+        for (int i = 0; i < reps; i++) {
+            start_time = omp_get_wtime();
+            surface_identity(size, size);
+            end_time = omp_get_wtime();
+            duration = end_time - start_time;
+            avg_duration += duration / reps;
+        }
+        printf("%lf\n", avg_duration);
+
+        //avg_duration = 0;
+        //for (int i = 0; i < reps; i++) {
+        //    start_time = omp_get_wtime();
+        //    difference_identity(size, size);
+        //    end_time = omp_get_wtime();
+        //    duration = end_time - start_time;
+        //    avg_duration += duration / reps;
+        //}
+        //printf("%lf, ", avg_duration);
+
+        //if (is_2power(size)) {
+        //    avg_duration = 0;
+        //    for (int i = 0; i < reps; i++) {
+        //        start_time = omp_get_wtime();
+        //        poisson_identity(size, size);
+        //        end_time = omp_get_wtime();
+        //        duration = end_time - start_time;
+        //        avg_duration += duration / reps;
+        //    }
+        //    printf("%lf\n", avg_duration);
+        //} else {
+        //    printf("-1\n");
+        //}
+    }
 }
