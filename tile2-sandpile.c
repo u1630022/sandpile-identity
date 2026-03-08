@@ -264,7 +264,7 @@ void free_stack(IntStack* stack) {
     free(stack);
 }
 
-// Source - https://stackoverflow.com/a
+// Source - https://stackoverflow.com/questions/28664642/avx2-shift-16-bit-integers/43365511#43365511
 // Posted by sergfc, modified by community. See post 'Timeline' for change history
 // Retrieved 2025-12-11, License - CC BY-SA 3.0
 static __m256i
@@ -1697,7 +1697,7 @@ difference_identity(int N, int M)
         stabilize_dense_topleft(n-2, m, identity, 0);
     }
 
-    // render_i(n, identity);
+    render_i(n, identity);
 
     free(identity);
 }
@@ -1838,48 +1838,5 @@ main(void)
     setlocale(LC_ALL, "");
     omp_set_num_threads(8);
 
-    int reps = 3;
-    double duration = 0;
-    double avg_duration = 0;
-    double start_time = 0;
-    double end_time = 0;
-
-    printf("size, surface_method\n");
-    for (int size = 64; size <= 512 + 128; size += 64) {
-        printf("%d, ", size);
-
-        avg_duration = 0;
-        for (int i = 0; i < reps; i++) {
-            start_time = omp_get_wtime();
-            surface_identity(size, size);
-            end_time = omp_get_wtime();
-            duration = end_time - start_time;
-            avg_duration += duration / reps;
-        }
-        printf("%lf\n", avg_duration);
-
-        //avg_duration = 0;
-        //for (int i = 0; i < reps; i++) {
-        //    start_time = omp_get_wtime();
-        //    difference_identity(size, size);
-        //    end_time = omp_get_wtime();
-        //    duration = end_time - start_time;
-        //    avg_duration += duration / reps;
-        //}
-        //printf("%lf, ", avg_duration);
-
-        //if (is_2power(size)) {
-        //    avg_duration = 0;
-        //    for (int i = 0; i < reps; i++) {
-        //        start_time = omp_get_wtime();
-        //        poisson_identity(size, size);
-        //        end_time = omp_get_wtime();
-        //        duration = end_time - start_time;
-        //        avg_duration += duration / reps;
-        //    }
-        //    printf("%lf\n", avg_duration);
-        //} else {
-        //    printf("-1\n");
-        //}
-    }
+    difference_identity(256, 256);
 }
